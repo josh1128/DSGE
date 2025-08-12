@@ -4,6 +4,7 @@
 # NK 3-equation system (IS, Phillips, Taylor), and simulate
 # IRFs to shocks. Plots: IRFs + historical lines.
 # Target inflation is fixed at 2%.
+# Robust to header spacing/casing; fills missing values.
 # -----------------------------------------------------------
 
 import pandas as pd
@@ -33,13 +34,45 @@ st.markdown(
 )
 
 # =========================================
+# Utilities for robust column handling
+# =========================================
+def _normalize_name(s: str) -> str:
+    """Lowercase, strip, collapse spaces for matching."""
+    return pd.Series([s]).str.strip().str.replace(r"\s+", " ", regex=True).str.lower().iloc[0]
+
+CANONICAL_MAP = {
+    "date": "Date",
+    "output gap": "Output Gap",
+    "nominal interest rate": "Nominal Rate",
+    "nominal rate": "Nominal Rate",
+    "inflation rate": "Inflation Rate",
+    "inflation gap": "Inflation Gap",
+    "foreign demand": "Foreign Demand",
+    "non-energy": "Non-Energy",
+    "non energy": "Non-Energy",
+    "energy": "Energy",
+    "reer": "REER",
+}
+
+def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Trim/collapse spaces and map to canonical names when recognized."""
+    cleaned = []
+    for c in df.columns:
+        norm = _normalize_name(str(c))
+        cleaned_name = CANONICAL_MAP.get(norm, pd.Series([c]).str.strip().str.replace(r"\s+", " ", regex=True).iloc[0])
+        cleaned.append(cleaned_name)
+    df = df.copy()
+    df.columns = cleaned
+    return df
+
+# =========================================
 # Data source
 # =========================================
 with st.sidebar:
     st.header("Data source")
     xlf = st.file_uploader("Upload DSGE_Model2.xlsx (optional)", type=["xlsx"])
     st.caption(
-        "Sheets & columns expected:\n"
+        "Sheets & columns expected (spacing/case flexible):\n"
         "• IS Curve: Date, Output Gap, Nominal Interest Rate, Inflation Rate, Foreign Demand, Non-Energy, Energy, REER\n"
         "• Phillips: Date, Inflation Rate, Output Gap, Foreign Demand, Non-Energy, Energy, REER\n"
         "• Taylor: Date, Nominal Interest Rate, Inflation Gap, Output Gap"
@@ -47,31 +80,33 @@ with st.sidebar:
     local_fallback = Path(__file__).parent / "DSGE_Model2.xlsx"
 
 def _read_sheets_flex(excel_src):
-    """
-    Try to read by expected sheet names; if not present, read first three sheets.
-    Returns (is_df, pc_df, tr_df).
-    """
+    """Read expected sheets; if names differ slightly, fall back to first three sheets."""
     xl = pd.ExcelFile(excel_src)
 
-    def find(name):
+    def _find(name):
         for s in xl.sheet_names:
             if s.strip().lower() == name.strip().lower():
                 return s
         return None
 
-    name_is = find("IS Curve")
-    name_pc = find("Phillips")
-    name_tr = find("Taylor")
+    name_is = _find("IS Curve")
+    name_pc = _find("Phillips")
+    name_tr = _find("Taylor")
 
     if all([name_is, name_pc, name_tr]):
         is_df = pd.read_excel(excel_src, sheet_name=name_is)
         pc_df = pd.read_excel(excel_src, sheet_name=name_pc)
         tr_df = pd.read_excel(excel_src, sheet_name=name_tr)
     else:
-        sheet_list = xl.sheet_names[:3]
-        is_df = pd.read_excel(excel_src, sheet_name=sheet_list[0])
-        pc_df = pd.read_excel(excel_src, sheet_name=sheet_list[1])
-        tr_df = pd.read_excel(excel_src, sheet_name=sheet_list[2])
+        # Fall back to the first three sheets
+        names = xl.sheet_names[:3]
+        is_df = pd.read_excel(excel_src, sheet_name=names[0])
+        pc_df = pd.read_excel(excel_src, sheet_name=names[1])
+        tr_df = pd.read_excel(excel_src, sheet_name=names[2])
+    # Standardize column names (spaces/case)
+    is_df = standardize_columns(is_df)
+    pc_df = standardize_columns(pc_df)
+    tr_df = standardize_columns(tr_df)
     return is_df, pc_df, tr_df
 
 @st.cache_data(show_spinner=True)
@@ -98,26 +133,25 @@ def load_and_prepare(file_like_or_path):
     is_df, pc_df, tr_df = _read_sheets_flex(excel_src)
 
     # Parse Date (YYYY-MM or YYYY-Qx) robustly
-    def parse_date(col):
-        try:
-            return pd.to_datetime(col, format="%Y-%m")
-        except Exception:
+    def parse_date(series):
+        # Try %Y-%m, else generic, else Q-period
+        out = pd.to_datetime(series, format="%Y-%m", errors="coerce")
+        if out.isna().all():
             try:
-                # Try generic parse; if like 1999Q1, coerce via PeriodIndex
-                return pd.PeriodIndex(col.astype(str), freq="Q").to_timestamp(how="end")
+                return pd.PeriodIndex(series.astype(str), freq="Q").to_timestamp(how="end")
             except Exception:
-                return pd.to_datetime(col, errors="coerce")
+                return pd.to_datetime(series, errors="coerce")
+        return out
 
     for df in (is_df, pc_df, tr_df):
         if "Date" not in df.columns:
             raise KeyError("Each sheet must contain a 'Date' column.")
         df["Date"] = parse_date(df["Date"])
 
-    # Keep only the needed columns per sheet
-    is_cols = ["Date", "Output Gap", "Nominal Interest Rate", "Inflation Rate", "Foreign Demand", "Non-Energy", "Energy", "REER"]
+    # Validate required columns (after standardization)
+    is_cols = ["Date", "Output Gap", "Nominal Rate", "Inflation Rate", "Foreign Demand", "Non-Energy", "Energy", "REER"]
     pc_cols = ["Date", "Inflation Rate", "Output Gap", "Foreign Demand", "Non-Energy", "Energy", "REER"]
-    tr_cols = ["Date", "Nominal Interest Rate", "Inflation Gap", "Output Gap"]
-
+    tr_cols = ["Date", "Nominal Rate", "Inflation Gap", "Output Gap"]
     for need, df, label in [
         (is_cols, is_df, "IS Curve"),
         (pc_cols, pc_df, "Phillips"),
@@ -127,41 +161,42 @@ def load_and_prepare(file_like_or_path):
         if missing:
             raise KeyError(f"Missing columns on '{label}' sheet: {missing}")
 
-    is_df = is_df[is_cols].copy()
-    pc_df = pc_df[pc_cols].copy()
-    tr_df = tr_df[tr_cols].copy()
+    # Prepare Taylor sheet to avoid duplicate-name collisions on merge
+    tr_df = tr_df.rename(columns={
+        "Nominal Rate": "Nominal Rate_Taylor",
+        "Output Gap": "Output Gap_Taylor"
+    })
 
-    # Merge on Date (inner join to keep aligned samples)
-    df = (
+    # Merge IS + PC (suffixes), then add Taylor
+    merged = (
         is_df.merge(pc_df, on="Date", how="inner", suffixes=("_IS", "_PC"))
              .merge(tr_df, on="Date", how="inner")
+             .sort_values("Date")
+             .set_index("Date")
     )
 
-    # Tidy names, prefer IS-sheet externals
-    df = df.sort_values("Date").set_index("Date")
-    df = df.rename(columns={
-        "Output Gap_IS": "Output Gap",
-        "Inflation Rate_IS": "Inflation Rate",
-        "Nominal Interest Rate": "Nominal Rate",
-        "Foreign Demand_IS": "Foreign Demand",
-        "Non-Energy_IS": "Non-Energy",
-        "Energy_IS": "Energy",
-        "REER_IS": "REER",
-        "Inflation Gap": "Inflation Gap"  # will be ignored in estimation; kept for reference
-    })
-    drop_dupes = [c for c in ["Output Gap_PC", "Inflation Rate_PC", "Foreign Demand_PC",
-                              "Non-Energy_PC", "Energy_PC", "REER_PC"] if c in df.columns]
-    df = df.drop(columns=drop_dupes)
+    # Build a canonical frame preferring IS externals and Taylor's nominal rate
+    df = pd.DataFrame(index=merged.index)
+    df["Output Gap"]    = merged["Output Gap_IS"]
+    df["Inflation Rate"] = merged["Inflation Rate_IS"]
+    df["Nominal Rate"]  = merged["Nominal Rate_Taylor"] if "Nominal Rate_Taylor" in merged.columns else merged["Nominal Rate_IS"]
+    df["Foreign Demand"] = merged["Foreign Demand_IS"]
+    df["Non-Energy"]     = merged["Non-Energy_IS"]
+    df["Energy"]         = merged["Energy_IS"]
+    df["REER"]           = merged["REER_IS"]
+    # Keep Excel Inflation Gap if present (for info only; not used in estimation)
+    if "Inflation Gap" in merged.columns:
+        df["Inflation Gap"] = merged["Inflation Gap"]
 
     # Interpolate/extrapolate missing values; finalize with ffill/bfill
     df_interp = df.interpolate(method="linear", limit_direction="both").ffill().bfill()
 
     # Helper variables & lags
-    df_interp["Real Rate"] = df_interp["Nominal Rate"] - df_interp["Inflation Rate"]
-    df_interp["Output Gap_L1"] = df_interp["Output Gap"].shift(1)
-    df_interp["Inflation Rate_L1"] = df_interp["Inflation Rate"].shift(1)
-    df_interp["Nominal Rate_L1"] = df_interp["Nominal Rate"].shift(1)
-    df_interp["Real Rate_L1"] = df_interp["Real Rate"].shift(1)
+    df_interp["Real Rate"]            = df_interp["Nominal Rate"] - df_interp["Inflation Rate"]
+    df_interp["Output Gap_L1"]        = df_interp["Output Gap"].shift(1)
+    df_interp["Inflation Rate_L1"]    = df_interp["Inflation Rate"].shift(1)
+    df_interp["Nominal Rate_L1"]      = df_interp["Nominal Rate"].shift(1)
+    df_interp["Real Rate_L1"]         = df_interp["Real Rate"].shift(1)
 
     # For estimation sets (drop initial lag NAs)
     req_for_est = [
@@ -217,7 +252,7 @@ def fit_models(df_est):
     model_pc = sm.OLS(y_pc.loc[pc_ok], X_pc.loc[pc_ok]).fit()
 
     # --- Taylor (partial adjustment): i_t on i_{t-1} + Inflation Gap_t + Output Gap_t
-    # Inflation Gap is enforced as (Inflation Rate - 2.0)
+    # Inflation gap enforced as (Inflation Rate - TARGET_PI)
     infl_gap = df_est["Inflation Rate"] - TARGET_PI
 
     X_tr = sm.add_constant(pd.DataFrame({
@@ -444,4 +479,5 @@ with st.expander("Model diagnostics (OLS summaries)"):
     st.write("**Phillips Curve**")
     st.text(models["model_pc"].summary().as_text())
     st.write("**Taylor Rule**")
+    st.text(models["model_tr"].summary().as_text())
 
