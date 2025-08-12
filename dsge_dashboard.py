@@ -1,27 +1,28 @@
 # dsge_dashboard.py
 # -----------------------------------------------------------
-# Streamlit app:
-# 1) Loads DSGE.xlsx (IS, Phillips, Taylor), estimates simple OLS models,
-#    and simulates impulse responses (GDP growth, inflation, policy rate).
-# 2) Optionally loads test.xlsx and provides an interactive Plotly graph viewer
-#    (General/IS/Phillips/Taylor tabs) with Raw/Trend/Cycle options.
+# This app lets you upload an Excel file, estimate 3 simple
+# macro relationships (IS, Phillips, Taylor), and simulate
+# what happens to GDP growth, inflation, and the policy rate
+# after a "shock." Results are shown as charts.
 # -----------------------------------------------------------
 
 import pandas as pd
 import numpy as np
-import statsmodels.api as sm
-import streamlit as st
-import matplotlib.pyplot as plt
-from pathlib import Path
-from statsmodels.tsa.filters.hp_filter import hpfilter
-import plotly.graph_objects as go
+import statsmodels.api as sm            # used to run simple regressions (OLS)
+import streamlit as st                  # used to build the web app UI
+import matplotlib.pyplot as plt         # used to make charts
+from pathlib import Path                # helps find the Excel file on disk
 
 # =========================================
 # Page setup
 # =========================================
+# Sets the browser tab title and layout width
 st.set_page_config(page_title="DSGE Model Dashboard", layout="wide")
+
+# Big page title the user sees
 st.title("DSGE IRF Dashboard — IS (Demand), Phillips (Supply), Taylor (Policy)")
 
+# Short explanation at the top of the page
 st.markdown(
     "Use the sidebar to pick shock type and size. "
     "**IS shock** hits GDP growth directly. **Phillips shock** hits inflation directly. "
@@ -29,74 +30,62 @@ st.markdown(
 )
 
 # =========================================
-# Data source (GitHub-friendly)
+# Data source (where the Excel file comes from)
 # =========================================
 with st.sidebar:
     st.header("Data source")
+
+    # Option 1: user uploads the Excel file by clicking here
     xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"])
     st.caption("Sheets required: 'IS Curve', 'Phillips', 'Taylor' (Date format: YYYY-MM)")
 
-    # Default to DSGE.xlsx in the same folder as this script (repo)
+    # Option 2 (fallback): if they don't upload a file, we look for DSGE.xlsx
+    # in the same folder as this script.
+    # If the app is on GitHub, put DSGE.xlsx in the repo with this file.
     local_fallback = Path(__file__).parent / "DSGE.xlsx"
 
-# Extra uploader for test.xlsx (optional)
-with st.sidebar:
-    st.header("Additional data (optional)")
-    test_file = st.file_uploader("Upload test.xlsx (optional)", type=["xlsx"], key="test_xlf")
-    test_fallback = Path(__file__).parent / "test.xlsx"  # repo-local fallback
-
-# =========================================
-# Helper: HP filter
-# =========================================
-def apply_hp_filter(df, column, prefix=None, log_transform=False, exp_transform=False):
-    """Adds {prefix}_Trend and {prefix}_Cycle columns using HP filter."""
-    if df is None or df.empty or column not in df.columns:
-        return df
-    prefix = prefix or column
-    series = df[column].replace(0, np.nan).dropna()
-    if len(series) < 10:
-        return df
-    clean = np.log(series) if log_transform else series
-    cycle, trend = hpfilter(clean, lamb=1600)
-    if exp_transform:
-        trend = np.exp(trend)
-    df[f"{prefix}_Trend"] = trend.reindex(df.index)
-    df[f"{prefix}_Cycle"] = cycle.reindex(df.index)
-    return df
-
-# =========================================
-# Load & prep DSGE.xlsx
-# =========================================
 @st.cache_data(show_spinner=True)
 def load_and_prepare(file_like_or_path):
-    # Require a source
+    """
+    Loads the Excel file, reads the 3 sheets, merges them on Date,
+    creates a few lagged variables, and returns:
+      - df:     the full merged dataset
+      - df_est: a cleaned version with no missing values in required columns
+    If anything is missing or misnamed, we raise a clear error message.
+    """
+
+    # If no file is provided at all, stop early with a helpful message.
     if file_like_or_path is None:
         raise FileNotFoundError(
             "No file provided. Upload DSGE.xlsx or include DSGE.xlsx in the repo folder."
         )
 
-    # Resolve path if a string/Path was provided
+    # If we got a path (string/Path), check that it exists. If we got an uploaded file,
+    # just pass it through. (Streamlit gives us a file-like object when a user uploads.)
     if isinstance(file_like_or_path, (str, Path)):
         p = Path(file_like_or_path)
+        # If path is relative, resolve it relative to where we’re running
         if not p.is_absolute():
             p = Path.cwd() / p
         if not p.exists():
+            # Non-technical users: if you see this, the file isn’t where we expect.
+            # Put DSGE.xlsx next to this .py file or upload it via the sidebar.
             raise FileNotFoundError(f"Could not find Excel file at: {p}")
         excel_src = p
     else:
-        # Uploaded file-like object (BytesIO)
-        excel_src = file_like_or_path
+        excel_src = file_like_or_path  # uploaded file object
 
-    # Read sheets
+    # Read the 3 sheets we need. Make sure your Excel sheet names match exactly.
     is_df = pd.read_excel(excel_src, sheet_name="IS Curve")
     pc_df = pd.read_excel(excel_src, sheet_name="Phillips")
     tr_df = pd.read_excel(excel_src, sheet_name="Taylor")
 
-    # Parse dates (YYYY-MM)
+    # Convert the Date column from text (e.g., "2010-03") to a real date.
+    # If your Excel file uses a different format, change "%Y-%m" here.
     for df in (is_df, pc_df, tr_df):
         df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
 
-    # Merge and index
+    # Merge the three sheets together using the Date column
     df = (
         is_df.merge(pc_df, on="Date", how="inner")
              .merge(tr_df, on="Date", how="inner")
@@ -104,20 +93,29 @@ def load_and_prepare(file_like_or_path):
              .set_index("Date")
     )
 
-    # Lags / drivers
+    # Create lagged versions of variables we’ll use in the models.
+    # A "lag" just means "previous quarter’s value".
     df["DlogGDP_L1"]        = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"]       = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"]   = df["Nominal Rate"].shift(1)
+    # Real rate = nominal - inflation, and then take the 2-quarter lag
     df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
 
+    # --------------------------------------------------------
+    # CHANGE ME (if your Excel column headers are different):
+    # Make sure these names match your Excel sheet columns.
+    # If you get a "Missing required columns" error, fix names here.
+    # --------------------------------------------------------
     required_cols = [
         "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
         "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
-        # IS externals (must match your sheet headers)
+        # IS externals
         "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
         # Phillips externals (lagged)
         "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]
+
+    # If any of those columns are missing, stop with a helpful message.
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise KeyError(
@@ -125,51 +123,64 @@ def load_and_prepare(file_like_or_path):
             "Adjust required_cols/X matrices to match your Excel headers."
         )
 
+    # Drop rows that have any missing values in the required columns.
+    # This avoids crashes when running the regressions.
     df_est = df.dropna(subset=required_cols).copy()
     if df_est.empty:
         raise ValueError("No rows remain after dropping NA for required columns. Check your data.")
 
     return df, df_est
 
-# Decide source: uploaded file first, else repo-local fallback
+# Pick our data source: uploaded file wins; otherwise, use the local fallback file
 file_source = xlf if xlf is not None else local_fallback
 
 try:
     df_all, df_est = load_and_prepare(file_source)
 except Exception as e:
+    # Prints a big red error box in the app if something goes wrong, then stops.
     st.error(f"Problem loading data: {e}")
     st.stop()
 
 # =========================================
-# Estimate equations (OLS)
+# Estimate equations (OLS = simple linear regression)
 # =========================================
 @st.cache_data(show_spinner=True)
 def fit_models(df_est):
-    # IS: DlogGDP_t ~ const + DlogGDP_{t-1} + real_rate_{t-2} + externals
+    """
+    Fits 3 separate regressions:
+      1) IS curve  -> predicts GDP growth (DlogGDP)
+      2) Phillips  -> predicts inflation (Dlog_CPI)
+      3) Taylor    -> predicts the nominal policy rate
+    Returns the fitted models and some long-run coefficients for the policy rule.
+    """
+
+    # --- IS curve: GDP growth today ~ last quarter's growth + old real rate + externals
     X_is = sm.add_constant(df_est[[
         "DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
     ]])
     y_is = df_est["DlogGDP"]
     model_is = sm.OLS(y_is, X_is).fit()
 
-    # Phillips: DlogCPI_t ~ const + DlogCPI_{t-1} + DlogGDP_{t-1} + externals (lagged)
+    # --- Phillips: inflation today ~ last quarter's inflation + last quarter's GDP growth + price externals
     X_pc = sm.add_constant(df_est[[
         "Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]])
     y_pc = df_est["Dlog_CPI"]
     model_pc = sm.OLS(y_pc, X_pc).fit()
 
-    # Taylor (partial adjustment basis): i_t ~ const + i_{t-1} + DlogCPI_t + DlogGDP_t
+    # --- Taylor (partial adjustment): policy rate today ~ last rate + current inflation + current GDP growth
     X_tr = sm.add_constant(df_est[["Nominal_Rate_L1", "Dlog_CPI", "DlogGDP"]])
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
 
-    # Long-run coefficients for target i*
-    b0   = float(model_tr.params["const"])
-    rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)  # cap to avoid explosive smoothing
-    bpi  = float(model_tr.params["Dlog_CPI"])
-    bg   = float(model_tr.params["DlogGDP"])
+    # Turn the Taylor regression into long-run weights for a "target" rate i*
+    # We cap the persistence (rhoh) at 0.99 to avoid weird behavior in simulation.
+    b0   = float(model_tr.params["const"]) #intercept for taylor 
+    rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99) #persistence of policy rate
+    bpi  = float(model_tr.params["Dlog_CPI"]) # tells you how muh the central bank raises or lower the rate when inflation changes by 1 unit 
+    bg   = float(model_tr.params["DlogGDP"]) # How much the policy rate moves when GDP growth changes
 
+    # These convert short-run regression coefficients into long-run effects
     alpha_star  = b0  / (1 - rhoh)
     phi_pi_star = bpi / (1 - rhoh)
     phi_g_star  = bg  / (1 - rhoh)
@@ -185,7 +196,7 @@ def fit_models(df_est):
 
 models = fit_models(df_est)
 
-# Baselines for simulation
+# Baseline means for simulations (used as steady-state anchors)
 i_neutral      = float(df_est["Nominal Rate"].mean())
 real_rate_mean = float(df_est["Real_Rate_L2_data"].mean())
 means = {
@@ -199,25 +210,38 @@ means = {
 }
 
 # =========================================
-# Sidebar: simulation controls
+# Sidebar: user picks simulation knobs
 # =========================================
 with st.sidebar:
     st.header("Simulation settings")
+
+    # How many quarters ahead to simulate?
     T = st.slider("Horizon (quarters)", min_value=8, max_value=60, value=20, step=1)
+
+    # How sticky is the policy rate? Higher = slower to move.
     rho_sim = st.slider("Policy smoothing ρ (0 = fast, 0.95 = slow)", 0.0, 0.95, 0.25, 0.05)
 
     st.header("Shock")
+
+    # Choose which block gets the shock, when it hits, how long it lasts, and how big it is.
     shock_target = st.selectbox("Apply shock to", ["None", "IS (Demand)", "Phillips (Supply)"], index=0)
     shock_quarter = st.slider("Shock timing (t)", min_value=1, max_value=T-1, value=1, step=1)
     shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
 
+    # Size of the shock:
+    # - IS shock adds directly to GDP growth in that period.
+    # - Phillips shock adds directly to inflation in that period.
     is_shock_size = st.number_input("IS shock size (Δ DlogGDP)", value=1.0, step=0.1, format="%.3f")
     pc_shock_size = st.number_input("Phillips shock size (Δ DlogCPI)", value=0.000, step=0.001, format="%.3f")
 
 # =========================================
-# Build shock arrays
+# Build shock paths over time (so they can decay each quarter)
 # =========================================
 def build_shocks(T, target, is_size, pc_size, t0, rho):
+    """
+    Creates two arrays (one for GDP growth shocks and one for inflation shocks).
+    The shock starts at quarter t0, and then shrinks each quarter by factor rho.
+    """
     is_arr = np.zeros(T)
     pc_arr = np.zeros(T)
     if target == "IS (Demand)":
@@ -235,14 +259,22 @@ is_shock_arr, pc_shock_arr = build_shocks(
 )
 
 # =========================================
-# Simulation
+# Simulation engine (the heart of the app)
 # =========================================
 def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
-    g = np.zeros(T)  # DlogGDP
-    p = np.zeros(T)  # DlogCPI
-    i = np.zeros(T)  # Nominal rate
+    """
+    Steps the economy forward T quarters.
+    - g[t]: GDP growth this quarter
+    - p[t]: inflation this quarter
+    - i[t]: policy rate this quarter
+    Uses the estimated models plus the shocks selected in the sidebar.
+    """
 
-    # Start near steady state
+    g = np.zeros(T)  # GDP growth (DlogGDP)
+    p = np.zeros(T)  # Inflation   (DlogCPI)
+    i = np.zeros(T)  # Nominal policy rate
+
+    # Start near steady-state values (typical/average levels)
     g[0] = float(df_est["DlogGDP"].mean())
     p[0] = float(df_est["Dlog_CPI"].mean())
     i[0] = i_neutral
@@ -253,16 +285,18 @@ def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
     phi_pi_star = models["phi_pi_star"]
     phi_g_star  = models["phi_g_star"]
 
+    # If no shocks passed in, use zeros (no shock)
     if is_shock_arr is None:
         is_shock_arr = np.zeros(T)
     if pc_shock_arr is None:
         pc_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        # Real rate with 2-quarter lag (fallback to sample mean early)
+        # Compute the real interest rate with a 2-quarter lag.
+        # Early on (t < 2) we fall back to an average so the code doesn’t crash.
         rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean
 
-        # IS
+        # --- IS block: predict GDP growth from last quarter's growth, lagged real rate, and externals
         Xis = pd.DataFrame([{
             "const": 1.0,
             "DlogGDP_L1": g[t - 1],
@@ -274,7 +308,7 @@ def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
         }])
         g[t] = model_is.predict(Xis).iloc[0] + is_shock_arr[t]
 
-        # Phillips
+        # --- Phillips block: predict inflation from last inflation, last GDP growth, and price externals
         Xpc = pd.DataFrame([{
             "const": 1.0,
             "Dlog_CPI_L1": p[t - 1],
@@ -285,19 +319,24 @@ def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
         }])
         p[t] = model_pc.predict(Xpc).iloc[0] + pc_shock_arr[t]
 
-        # Taylor (partial adjustment)
+        # --- Taylor rule with partial adjustment:
+        # First compute the "target" rate i* (what the central bank wants)
         i_star = alpha_star + phi_pi_star * p[t] + phi_g_star * g[t]
+        # Then move the actual rate part of the way toward i* (rho controls how slowly)
         i[t]   = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
     return g, p, i
 
-# Baseline vs scenario
-g0, p0, i0 = simulate(T=T, rho_sim=rho_sim)  # no shocks
+# Run two simulations:
+#  - Baseline: no shocks
+#  - Scenario: with your chosen shock settings
+g0, p0, i0 = simulate(T=T, rho_sim=rho_sim)  # baseline (no shock)
 g1, p1, i1 = simulate(T=T, rho_sim=rho_sim, is_shock_arr=is_shock_arr, pc_shock_arr=pc_shock_arr)
 
 # =========================================
-# Plot (Matplotlib) — IRFs
+# Plot results
 # =========================================
+# Make chart text a bit larger
 plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
 
 fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
@@ -305,7 +344,7 @@ fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
 quarters = np.arange(T)
 vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
-# GDP Growth
+# --- GDP Growth chart
 axes[0].plot(quarters, g0, label="Baseline", linewidth=2)
 axes[0].plot(quarters, g1, label="Scenario", linewidth=2)
 axes[0].axhline(float(df_est["DlogGDP"].mean()), ls="--", color="gray", label="Steady State")
@@ -315,7 +354,7 @@ axes[0].set_ylabel("DlogGDP")
 axes[0].grid(True, alpha=0.3)
 axes[0].legend(loc="best")
 
-# Inflation
+# --- Inflation chart
 axes[1].plot(quarters, p0, label="Baseline", linewidth=2)
 axes[1].plot(quarters, p1, label="Scenario", linewidth=2)
 axes[1].axhline(float(df_est["Dlog_CPI"].mean()), ls="--", color="gray", label="Steady State")
@@ -325,7 +364,7 @@ axes[1].set_ylabel("DlogCPI")
 axes[1].grid(True, alpha=0.3)
 axes[1].legend(loc="best")
 
-# Policy Rate
+# --- Policy Rate chart
 axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
 axes[2].plot(quarters, i1, label="Scenario", linewidth=2)
 axes[2].axhline(i_neutral, ls="--", color="gray", label="Neutral Rate")
@@ -337,207 +376,13 @@ axes[2].grid(True, alpha=0.3)
 axes[2].legend(loc="best")
 
 plt.tight_layout()
-st.pyplot(fig)
+st.pyplot(fig)  # Show the chart inside the Streamlit app
 
 # =========================================
-# Load test.xlsx (optional) + Plotly Graph Viewer
+# Diagnostics (for the curious)
 # =========================================
-@st.cache_data(show_spinner=True)
-def load_test_dataset(file_like_or_path):
-    # Resolve source (uploaded file or path)
-    if file_like_or_path is None:
-        return None
-    if isinstance(file_like_or_path, (str, Path)):
-        p = Path(file_like_or_path)
-        if not p.is_absolute():
-            p = Path.cwd() / p
-        if not p.exists():
-            return None
-        excel_src = p
-    else:
-        excel_src = file_like_or_path  # uploaded object
-
-    # Expected sheets
-    sheet_main     = "Potential Output"
-    sheet_hours    = "Hours"
-    sheet_is       = "IS Curve"
-    sheet_phillips = "Phillips Curve"
-    sheet_taylor   = "Taylor Rule"
-
-    xls = pd.ExcelFile(excel_src)
-    required = [sheet_main, sheet_hours, sheet_is, sheet_phillips, sheet_taylor]
-    missing = [s for s in required if s not in xls.sheet_names]
-    if missing:
-        return None
-
-    # Load
-    df_main     = pd.read_excel(xls, sheet_name=sheet_main, na_values=["NA"])
-    df_hours    = pd.read_excel(xls, sheet_name=sheet_hours, na_values=["NA"])
-    df_is       = pd.read_excel(xls, sheet_name=sheet_is, na_values=["NA"])
-    df_phillips = pd.read_excel(xls, sheet_name=sheet_phillips, na_values=["NA"])
-    df_taylor   = pd.read_excel(xls, sheet_name=sheet_taylor, na_values=["NA"])
-
-    # Normalize columns + dates
-    for d in (df_main, df_hours, df_is, df_phillips, df_taylor):
-        d.columns = d.columns.str.strip()
-        if "Date" in d.columns:
-            d["Date"] = pd.to_datetime(d["Date"], format="%Y-%m", errors="coerce").fillna(
-                pd.to_datetime(d["Date"], errors="coerce")
-            )
-            d.dropna(subset=["Date"], inplace=True)
-            d.sort_values("Date", inplace=True)
-            d.reset_index(drop=True, inplace=True)
-
-    # Merge hours -> main
-    if "Average Hours Worked" in df_hours.columns and "Date" in df_hours.columns and "Date" in df_main.columns:
-        df_main = pd.merge_asof(
-            df_main.sort_values("Date"),
-            df_hours.sort_values("Date"),
-            on="Date",
-            direction="backward"
-        )
-
-    # Construct helpful cols if present
-    if {"Population","Labour Force Participation","NAIRU","Average Hours Worked","Real GDP Expenditure"}.issubset(df_main.columns):
-        df_main["LFP_decimal"]   = df_main["Labour Force Participation"] / 100
-        df_main["NAIRU_decimal"] = df_main["NAIRU"] / 100
-        df_main["Total Hours Worked"] = (
-            df_main["Population"]
-            * df_main["LFP_decimal"]
-            * (1 - df_main["NAIRU_decimal"])
-            * df_main["Average Hours Worked"]
-        )
-        if "Labour Productivity" not in df_main.columns and "Total Hours Worked" in df_main.columns:
-            with np.errstate(divide="ignore", invalid="ignore"):
-                df_main["Labour Productivity"] = df_main["Real GDP Expenditure"] / df_main["Total Hours Worked"]
-
-        # HP-filter some key series (raw trend/cycle)
-        for col in ["Labour Force Participation","Labour Productivity","Average Hours Worked","Real GDP Expenditure"]:
-            apply_hp_filter(df_main, col)
-
-        # Potential Output proxy if not provided
-        if "Potential Output" not in df_main.columns:
-            if "Real GDP Expenditure_Trend" in df_main.columns:
-                df_main["Potential Output"] = df_main["Real GDP Expenditure_Trend"]
-            else:
-                df_main["Potential Output"] = df_main["Real GDP Expenditure"]
-
-        apply_hp_filter(df_main, "Potential Output", log_transform=True, exp_transform=True)
-
-        with np.errstate(divide="ignore", invalid="ignore"):
-            df_main["Output Gap (%)"] = (
-                (df_main["Real GDP Expenditure"] - df_main["Potential Output"])
-                / df_main["Potential Output"]
-            ) * 100
-
-    def with_year(df):
-        if df is None or df.empty or "Date" not in df.columns:
-            return df
-        out = df.copy()
-        out["Year"] = out["Date"].dt.year
-        return out
-
-    return {
-        "main":     with_year(df_main),
-        "is":       with_year(df_is),
-        "phillips": with_year(df_phillips),
-        "taylor":   with_year(df_taylor),
-    }
-
-# Decide test source: uploaded first, else repo fallback (or None)
-test_source = test_file if test_file is not None else (test_fallback if test_fallback.exists() else None)
-test_data = load_test_dataset(test_source)
-
-# =========================================
-# Plotly Graph Viewer (for test.xlsx) — with unique keys
-# =========================================
-st.markdown("---")
-st.header("Test.xlsx — Graph Viewer")
-
-def plot_selector(frame, default_var=None, title_prefix="", key_prefix="gen"):
-    if frame is None or frame.empty:
-        st.info("No data available for this tab.")
-        return
-
-    numeric_cols = [c for c in frame.columns
-                    if c not in {"Date","Year"}
-                    and frame[c].dtype.kind in "biufc"
-                    and not c.endswith("_Cycle")
-                    and not c.endswith("_Trend")]
-    if not numeric_cols:
-        st.info("No numeric columns to plot.")
-        return
-
-    col1, col2 = st.columns([2,1])
-    sorted_cols = sorted(numeric_cols)
-    default_idx = sorted_cols.index(default_var) if (default_var in sorted_cols) else 0
-
-    with col1:
-        var = st.selectbox(
-            "Variable",
-            sorted_cols,
-            index=default_idx,
-            key=f"{key_prefix}_var"
-        )
-    with col2:
-        kind = st.radio(
-            "Data type",
-            ["Raw","Trend","Cycle","Raw + Trend"],
-            horizontal=True,
-            key=f"{key_prefix}_kind"
-        )
-
-    years = frame["Year"]
-    ymin, ymax = int(years.min()), int(years.max())
-    yr = st.slider(
-        "Year range",
-        min_value=ymin,
-        max_value=ymax,
-        value=(ymin, ymax),
-        key=f"{key_prefix}_yr"
-    )
-
-    mask = (frame["Year"] >= yr[0]) & (frame["Year"] <= yr[1])
-    f = frame.loc[mask].copy()
-
-    fig = go.Figure()
-    if kind in ("Raw","Raw + Trend"):
-        fig.add_trace(go.Scatter(x=f["Date"], y=f[var], mode="lines", name=f"{var} — Raw"))
-    if kind in ("Trend","Raw + Trend"):
-        fig.add_trace(go.Scatter(x=f["Date"], y=f.get(f"{var}_Trend"), mode="lines", name=f"{var} — Trend"))
-    if kind == "Cycle":
-        fig.add_trace(go.Scatter(x=f["Date"], y=f.get(f"{var}_Cycle"), mode="lines", name=f"{var} — Cycle"))
-
-    fig.update_layout(
-        title={"text": f"{title_prefix}{var} ({yr[0]}–{yr[1]})", "x":0.5},
-        xaxis_title="Date",
-        yaxis_title=var,
-        template="plotly_white",
-        hovermode="x unified",
-        margin=dict(l=40,r=40,t=60,b=40)
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-if test_data is not None and isinstance(test_data, dict) and test_data.get("main") is not None:
-    tab1, tab2, tab3, tab4 = st.tabs(["General", "IS Curve", "Phillips Curve", "Taylor Rule"])
-
-    with tab1:
-        plot_selector(test_data["main"], default_var="Potential Output", title_prefix="General — ", key_prefix="tab_gen")
-
-    with tab2:
-        plot_selector(test_data["is"], title_prefix="IS Curve — ", key_prefix="tab_is")
-
-    with tab3:
-        plot_selector(test_data["phillips"], title_prefix="Phillips — ", key_prefix="tab_ph")
-
-    with tab4:
-        plot_selector(test_data["taylor"], title_prefix="Taylor — ", key_prefix="tab_tr")
-else:
-    st.info("Upload **test.xlsx** or place it in the repo next to this script to enable the Graph Viewer.")
-
-# =========================================
-# Diagnostics
-# =========================================
+# This section prints detailed regression output (coefficients, R-squared, etc.)
+# Non-technical users can ignore this, but it’s helpful for power users.
 with st.expander("Model diagnostics (OLS summaries)"):
     st.write("**IS Curve**")
     st.text(models["model_is"].summary().as_text())
