@@ -1,10 +1,20 @@
 # dsge_dashboard.py
+# -----------------------------------------------------------
+# Streamlit app:
+# 1) Loads DSGE.xlsx (IS, Phillips, Taylor), estimates simple OLS models,
+#    and simulates impulse responses (GDP growth, inflation, policy rate).
+# 2) Optionally loads test.xlsx and provides an interactive Plotly graph viewer
+#    (General/IS/Phillips/Taylor tabs) with Raw/Trend/Cycle options.
+# -----------------------------------------------------------
+
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
 import streamlit as st
 import matplotlib.pyplot as plt
 from pathlib import Path
+from statsmodels.tsa.filters.hp_filter import hpfilter
+import plotly.graph_objects as go
 
 # =========================================
 # Page setup
@@ -29,6 +39,34 @@ with st.sidebar:
     # Default to DSGE.xlsx in the same folder as this script (repo)
     local_fallback = Path(__file__).parent / "DSGE.xlsx"
 
+# Extra uploader for test.xlsx (optional)
+with st.sidebar:
+    st.header("Additional data (optional)")
+    test_file = st.file_uploader("Upload test.xlsx (optional)", type=["xlsx"], key="test_xlf")
+    test_fallback = Path(__file__).parent / "test.xlsx"  # repo-local fallback
+
+# =========================================
+# Helper: HP filter
+# =========================================
+def apply_hp_filter(df, column, prefix=None, log_transform=False, exp_transform=False):
+    """Adds {prefix}_Trend and {prefix}_Cycle columns using HP filter."""
+    if df is None or df.empty or column not in df.columns:
+        return df
+    prefix = prefix or column
+    series = df[column].replace(0, np.nan).dropna()
+    if len(series) < 10:
+        return df
+    clean = np.log(series) if log_transform else series
+    cycle, trend = hpfilter(clean, lamb=1600)
+    if exp_transform:
+        trend = np.exp(trend)
+    df[f"{prefix}_Trend"] = trend.reindex(df.index)
+    df[f"{prefix}_Cycle"] = cycle.reindex(df.index)
+    return df
+
+# =========================================
+# Load & prep DSGE.xlsx
+# =========================================
 @st.cache_data(show_spinner=True)
 def load_and_prepare(file_like_or_path):
     # Require a source
@@ -54,7 +92,7 @@ def load_and_prepare(file_like_or_path):
     pc_df = pd.read_excel(excel_src, sheet_name="Phillips")
     tr_df = pd.read_excel(excel_src, sheet_name="Taylor")
 
-    # Parse dates
+    # Parse dates (YYYY-MM)
     for df in (is_df, pc_df, tr_df):
         df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
 
@@ -82,10 +120,10 @@ def load_and_prepare(file_like_or_path):
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
-      raise KeyError(
-          f"Missing required columns in merged dataframe: {missing}. "
-          "Adjust required_cols/X matrices to match your Excel headers."
-      )
+        raise KeyError(
+            f"Missing required columns in merged dataframe: {missing}. "
+            "Adjust required_cols/X matrices to match your Excel headers."
+        )
 
     df_est = df.dropna(subset=required_cols).copy()
     if df_est.empty:
@@ -258,7 +296,7 @@ g0, p0, i0 = simulate(T=T, rho_sim=rho_sim)  # no shocks
 g1, p1, i1 = simulate(T=T, rho_sim=rho_sim, is_shock_arr=is_shock_arr, pc_shock_arr=pc_shock_arr)
 
 # =========================================
-# Plot (bigger fonts + clear titles)
+# Plot (Matplotlib) — IRFs
 # =========================================
 plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
 
@@ -300,6 +338,193 @@ axes[2].legend(loc="best")
 
 plt.tight_layout()
 st.pyplot(fig)
+
+# =========================================
+# Load test.xlsx (optional) + Plotly Graph Viewer
+# =========================================
+@st.cache_data(show_spinner=True)
+def load_test_dataset(file_like_or_path):
+    # Resolve source (uploaded file or path)
+    if file_like_or_path is None:
+        return None
+    if isinstance(file_like_or_path, (str, Path)):
+        p = Path(file_like_or_path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            return None
+        excel_src = p
+    else:
+        excel_src = file_like_or_path  # uploaded object
+
+    # Expected sheets
+    sheet_main     = "Potential Output"
+    sheet_hours    = "Hours"
+    sheet_is       = "IS Curve"
+    sheet_phillips = "Phillips Curve"
+    sheet_taylor   = "Taylor Rule"
+
+    xls = pd.ExcelFile(excel_src)
+    required = [sheet_main, sheet_hours, sheet_is, sheet_phillips, sheet_taylor]
+    missing = [s for s in required if s not in xls.sheet_names]
+    if missing:
+        return None
+
+    # Load
+    df_main     = pd.read_excel(xls, sheet_name=sheet_main, na_values=["NA"])
+    df_hours    = pd.read_excel(xls, sheet_name=sheet_hours, na_values=["NA"])
+    df_is       = pd.read_excel(xls, sheet_name=sheet_is, na_values=["NA"])
+    df_phillips = pd.read_excel(xls, sheet_name=sheet_phillips, na_values=["NA"])
+    df_taylor   = pd.read_excel(xls, sheet_name=sheet_taylor, na_values=["NA"])
+
+    # Normalize columns + dates
+    for d in (df_main, df_hours, df_is, df_phillips, df_taylor):
+        d.columns = d.columns.str.strip()
+        if "Date" in d.columns:
+            d["Date"] = pd.to_datetime(d["Date"], format="%Y-%m", errors="coerce").fillna(
+                pd.to_datetime(d["Date"], errors="coerce")
+            )
+            d.dropna(subset=["Date"], inplace=True)
+            d.sort_values("Date", inplace=True)
+            d.reset_index(drop=True, inplace=True)
+
+    # Merge hours -> main
+    if "Average Hours Worked" in df_hours.columns and "Date" in df_hours.columns and "Date" in df_main.columns:
+        df_main = pd.merge_asof(
+            df_main.sort_values("Date"),
+            df_hours.sort_values("Date"),
+            on="Date",
+            direction="backward"
+        )
+
+    # Construct helpful cols if present
+    if {"Population","Labour Force Participation","NAIRU","Average Hours Worked","Real GDP Expenditure"}.issubset(df_main.columns):
+        df_main["LFP_decimal"]   = df_main["Labour Force Participation"] / 100
+        df_main["NAIRU_decimal"] = df_main["NAIRU"] / 100
+        df_main["Total Hours Worked"] = (
+            df_main["Population"]
+            * df_main["LFP_decimal"]
+            * (1 - df_main["NAIRU_decimal"])
+            * df_main["Average Hours Worked"]
+        )
+        if "Labour Productivity" not in df_main.columns and "Total Hours Worked" in df_main.columns:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                df_main["Labour Productivity"] = df_main["Real GDP Expenditure"] / df_main["Total Hours Worked"]
+
+        # HP-filter some key series (raw trend/cycle)
+        for col in ["Labour Force Participation","Labour Productivity","Average Hours Worked","Real GDP Expenditure"]:
+            apply_hp_filter(df_main, col)
+
+        # Potential Output proxy if not provided
+        if "Potential Output" not in df_main.columns:
+            if "Real GDP Expenditure_Trend" in df_main.columns:
+                df_main["Potential Output"] = df_main["Real GDP Expenditure_Trend"]
+            else:
+                df_main["Potential Output"] = df_main["Real GDP Expenditure"]
+
+        apply_hp_filter(df_main, "Potential Output", log_transform=True, exp_transform=True)
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df_main["Output Gap (%)"] = (
+                (df_main["Real GDP Expenditure"] - df_main["Potential Output"])
+                / df_main["Potential Output"]
+            ) * 100
+
+    def with_year(df):
+        if df is None or df.empty or "Date" not in df.columns:
+            return df
+        out = df.copy()
+        out["Year"] = out["Date"].dt.year
+        return out
+
+    return {
+        "main":     with_year(df_main),
+        "is":       with_year(df_is),
+        "phillips": with_year(df_phillips),
+        "taylor":   with_year(df_taylor),
+    }
+
+# Decide test source: uploaded first, else repo fallback (or None)
+test_source = test_file if test_file is not None else (test_fallback if test_fallback.exists() else None)
+test_data = load_test_dataset(test_source)
+
+# =========================================
+# Plotly Graph Viewer (for test.xlsx)
+# =========================================
+st.markdown("---")
+st.header("Test.xlsx — Graph Viewer")
+
+def plot_selector(frame, default_var=None, title_prefix=""):
+    if frame is None or frame.empty:
+        st.info("No data available for this tab.")
+        return
+
+    numeric_cols = [c for c in frame.columns
+                    if c not in {"Date","Year"}
+                    and frame[c].dtype.kind in "biufc"
+                    and not c.endswith("_Cycle")
+                    and not c.endswith("_Trend")]
+
+    if not numeric_cols:
+        st.info("No numeric columns to plot.")
+        return
+
+    col1, col2 = st.columns([2,1])
+    sorted_cols = sorted(numeric_cols)
+    if default_var and default_var in sorted_cols:
+        default_idx = sorted_cols.index(default_var)
+    else:
+        default_idx = 0
+
+    with col1:
+        var = st.selectbox("Variable", sorted_cols, index=default_idx)
+    with col2:
+        kind = st.radio("Data type", ["Raw","Trend","Cycle","Raw + Trend"], horizontal=True)
+
+    years = frame["Year"]
+    ymin, ymax = int(years.min()), int(years.max())
+    yr = st.slider("Year range", min_value=ymin, max_value=ymax, value=(ymin, ymax))
+    mask = (frame["Year"] >= yr[0]) & (frame["Year"] <= yr[1])
+    f = frame.loc[mask].copy()
+
+    fig = go.Figure()
+    if kind in ("Raw","Raw + Trend"):
+        fig.add_trace(go.Scatter(x=f["Date"], y=f[var], mode="lines", name=f"{var} — Raw"))
+    if kind in ("Trend","Raw + Trend"):
+        fig.add_trace(go.Scatter(x=f["Date"], y=f.get(f"{var}_Trend"), mode="lines", name=f"{var} — Trend"))
+    if kind == "Cycle":
+        fig.add_trace(go.Scatter(x=f["Date"], y=f.get(f"{var}_Cycle"), mode="lines", name=f"{var} — Cycle"))
+
+    fig.update_layout(
+        title={"text": f"{title_prefix}{var} ({yr[0]}–{yr[1]})", "x":0.5},
+        xaxis_title="Date",
+        yaxis_title=var,
+        template="plotly_white",
+        hovermode="x unified",
+        margin=dict(l=40,r=40,t=60,b=40)
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+if test_data is not None and isinstance(test_data, dict) and test_data.get("main") is not None:
+    tab1, tab2, tab3, tab4 = st.tabs(["General", "IS Curve", "Phillips Curve", "Taylor Rule"])
+
+    with tab1:
+        plot_selector(test_data["main"], default_var="Potential Output", title_prefix="General — ")
+        # Optional tip
+        f = test_data["main"]
+        if f is not None and "Real GDP Expenditure" in f.columns and "Potential Output" in f.columns:
+            st.caption("Tip: Choose **Potential Output**, then switch to **Raw + Trend** to compare with GDP trend.")
+
+    with tab2:
+        plot_selector(test_data["is"], title_prefix="IS Curve — ")
+
+    with tab3:
+        plot_selector(test_data["phillips"], title_prefix="Phillips — ")
+
+    with tab4:
+        plot_selector(test_data["taylor"], title_prefix="Taylor — ")
+else:
+    st.info("Upload **test.xlsx** or place it in the repo next to this script to enable the Graph Viewer.")
 
 # =========================================
 # Diagnostics
