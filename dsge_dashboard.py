@@ -449,12 +449,12 @@ test_source = test_file if test_file is not None else (test_fallback if test_fal
 test_data = load_test_dataset(test_source)
 
 # =========================================
-# Plotly Graph Viewer (for test.xlsx)
+# Plotly Graph Viewer (for test.xlsx) — with unique keys
 # =========================================
 st.markdown("---")
 st.header("Test.xlsx — Graph Viewer")
 
-def plot_selector(frame, default_var=None, title_prefix=""):
+def plot_selector(frame, default_var=None, title_prefix="", key_prefix="gen"):
     if frame is None or frame.empty:
         st.info("No data available for this tab.")
         return
@@ -464,26 +464,39 @@ def plot_selector(frame, default_var=None, title_prefix=""):
                     and frame[c].dtype.kind in "biufc"
                     and not c.endswith("_Cycle")
                     and not c.endswith("_Trend")]
-
     if not numeric_cols:
         st.info("No numeric columns to plot.")
         return
 
     col1, col2 = st.columns([2,1])
     sorted_cols = sorted(numeric_cols)
-    if default_var and default_var in sorted_cols:
-        default_idx = sorted_cols.index(default_var)
-    else:
-        default_idx = 0
+    default_idx = sorted_cols.index(default_var) if (default_var in sorted_cols) else 0
 
     with col1:
-        var = st.selectbox("Variable", sorted_cols, index=default_idx)
+        var = st.selectbox(
+            "Variable",
+            sorted_cols,
+            index=default_idx,
+            key=f"{key_prefix}_var"
+        )
     with col2:
-        kind = st.radio("Data type", ["Raw","Trend","Cycle","Raw + Trend"], horizontal=True)
+        kind = st.radio(
+            "Data type",
+            ["Raw","Trend","Cycle","Raw + Trend"],
+            horizontal=True,
+            key=f"{key_prefix}_kind"
+        )
 
     years = frame["Year"]
     ymin, ymax = int(years.min()), int(years.max())
-    yr = st.slider("Year range", min_value=ymin, max_value=ymax, value=(ymin, ymax))
+    yr = st.slider(
+        "Year range",
+        min_value=ymin,
+        max_value=ymax,
+        value=(ymin, ymax),
+        key=f"{key_prefix}_yr"
+    )
+
     mask = (frame["Year"] >= yr[0]) & (frame["Year"] <= yr[1])
     f = frame.loc[mask].copy()
 
@@ -509,20 +522,16 @@ if test_data is not None and isinstance(test_data, dict) and test_data.get("main
     tab1, tab2, tab3, tab4 = st.tabs(["General", "IS Curve", "Phillips Curve", "Taylor Rule"])
 
     with tab1:
-        plot_selector(test_data["main"], default_var="Potential Output", title_prefix="General — ")
-        # Optional tip
-        f = test_data["main"]
-        if f is not None and "Real GDP Expenditure" in f.columns and "Potential Output" in f.columns:
-            st.caption("Tip: Choose **Potential Output**, then switch to **Raw + Trend** to compare with GDP trend.")
+        plot_selector(test_data["main"], default_var="Potential Output", title_prefix="General — ", key_prefix="tab_gen")
 
     with tab2:
-        plot_selector(test_data["is"], title_prefix="IS Curve — ")
+        plot_selector(test_data["is"], title_prefix="IS Curve — ", key_prefix="tab_is")
 
     with tab3:
-        plot_selector(test_data["phillips"], title_prefix="Phillips — ")
+        plot_selector(test_data["phillips"], title_prefix="Phillips — ", key_prefix="tab_ph")
 
     with tab4:
-        plot_selector(test_data["taylor"], title_prefix="Taylor — ")
+        plot_selector(test_data["taylor"], title_prefix="Taylor — ", key_prefix="tab_tr")
 else:
     st.info("Upload **test.xlsx** or place it in the repo next to this script to enable the Graph Viewer.")
 
