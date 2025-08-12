@@ -313,25 +313,6 @@ plt.tight_layout()
 st.pyplot(fig)
 
 # =========================================
-# Combined Scenario Plot (optional)
-# =========================================
-# First differences to show nominal rate "growth" if desired
-di1 = np.r_[0.0, np.diff(i1)]  # scenario Δi in percentage points
-
-fig2 = plt.figure(figsize=(12, 4.5))
-plt.plot(quarters, g1, linewidth=2, label="GDP growth (DlogGDP)")
-plt.plot(quarters, p1, linewidth=2, label="CPI growth (DlogCPI)")
-plt.plot(quarters, di1, linewidth=2, label="Nominal rate change (Δ, pp)")
-plt.axvline(shock_quarter, **vline_kwargs)
-plt.title("Combined: Growth / Changes (Scenario)")
-plt.xlabel("Quarters ahead")
-plt.ylabel("Growth / Change")
-plt.grid(True, alpha=0.3)
-plt.legend(loc="best")
-plt.tight_layout()
-st.pyplot(fig2)
-
-# =========================================
 # NEW: Historical time series (like your reference chart)
 # =========================================
 # Build a clean plotting frame from historical data
@@ -379,4 +360,5 @@ with st.expander("Model diagnostics (OLS summaries)"):
     st.text(models["model_pc"].summary().as_text())
     st.write("**Taylor Rule**")
     st.text(models["model_tr"].summary().as_text())
+
 
