@@ -19,32 +19,29 @@ st.markdown(
 )
 
 # =========================================
-# Load & prep data (robust to upload vs local file)
+# Data source (GitHub-friendly)
 # =========================================
 with st.sidebar:
     st.header("Data source")
-    xlf = st.file_uploader("Upload DSGE.xlsx (preferred)", type=["xlsx"])
+    xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"])
     st.caption("Sheets required: 'IS Curve', 'Phillips', 'Taylor' (Date format: YYYY-MM)")
 
-    # Optional: allow a local fallback when running on your own machine
-    local_fallback = st.text_input(
-        "OR type a local path to DSGE.xlsx (optional). If left as 'DSGE.xlsx', I'll search the app folder.",
-        value="DSGE.xlsx"
-    )
+    # Default to DSGE.xlsx in the same folder as this script (repo)
+    local_fallback = Path(__file__).parent / "DSGE.xlsx"
 
 @st.cache_data(show_spinner=True)
 def load_and_prepare(file_like_or_path):
-    # Guard: require a source
+    # Require a source
     if file_like_or_path is None:
         raise FileNotFoundError(
-            "No file provided. Upload DSGE.xlsx or place DSGE.xlsx in the app folder."
+            "No file provided. Upload DSGE.xlsx or include DSGE.xlsx in the repo folder."
         )
 
     # Resolve path if a string/Path was provided
     if isinstance(file_like_or_path, (str, Path)):
         p = Path(file_like_or_path)
         if not p.is_absolute():
-            p = Path.cwd() / p  # relative to where Streamlit runs
+            p = Path.cwd() / p
         if not p.exists():
             raise FileNotFoundError(f"Could not find Excel file at: {p}")
         excel_src = p
@@ -59,7 +56,6 @@ def load_and_prepare(file_like_or_path):
 
     # Parse dates
     for df in (is_df, pc_df, tr_df):
-        # Expecting YYYY-MM
         df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
 
     # Merge and index
@@ -70,27 +66,26 @@ def load_and_prepare(file_like_or_path):
              .set_index("Date")
     )
 
-    # Construct lags / drivers used in models
+    # Lags / drivers
     df["DlogGDP_L1"]        = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"]       = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"]   = df["Nominal Rate"].shift(1)
     df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
 
-    # Ensure required columns exist before dropping NA
     required_cols = [
         "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
         "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
-        # IS externals (you should ensure these names match your Excel headers)
+        # IS externals (must match your sheet headers)
         "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
         # Phillips externals (lagged)
         "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
-        raise KeyError(
-            f"Missing required columns in merged dataframe: {missing}. "
-            "Check your sheet column names."
-        )
+      raise KeyError(
+          f"Missing required columns in merged dataframe: {missing}. "
+          "Adjust required_cols/X matrices to match your Excel headers."
+      )
 
     df_est = df.dropna(subset=required_cols).copy()
     if df_est.empty:
@@ -98,7 +93,7 @@ def load_and_prepare(file_like_or_path):
 
     return df, df_est
 
-# Decide the source: uploaded file first, else local fallback path string
+# Decide source: uploaded file first, else repo-local fallback
 file_source = xlf if xlf is not None else local_fallback
 
 try:
@@ -131,7 +126,7 @@ def fit_models(df_est):
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
 
-    # Convert to long-run coefficients used in simulation target i*
+    # Long-run coefficients for target i*
     b0   = float(model_tr.params["const"])
     rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)  # cap to avoid explosive smoothing
     bpi  = float(model_tr.params["Dlog_CPI"])
@@ -166,7 +161,7 @@ means = {
 }
 
 # =========================================
-# Sidebar controls
+# Sidebar: simulation controls
 # =========================================
 with st.sidebar:
     st.header("Simulation settings")
@@ -178,7 +173,6 @@ with st.sidebar:
     shock_quarter = st.slider("Shock timing (t)", min_value=1, max_value=T-1, value=1, step=1)
     shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
 
-    # Separate inputs so units are clear
     is_shock_size = st.number_input("IS shock size (Δ DlogGDP)", value=1.0, step=0.1, format="%.3f")
     pc_shock_size = st.number_input("Phillips shock size (Δ DlogCPI)", value=0.000, step=0.001, format="%.3f")
 
@@ -253,7 +247,7 @@ def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
         }])
         p[t] = model_pc.predict(Xpc).iloc[0] + pc_shock_arr[t]
 
-        # Taylor (partial adjustment): i_t = ρ i_{t-1} + (1-ρ) * i*
+        # Taylor (partial adjustment)
         i_star = alpha_star + phi_pi_star * p[t] + phi_g_star * g[t]
         i[t]   = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
