@@ -1,6 +1,6 @@
+streamlit
 pandas
 numpy
-statsmodels
 matplotlib
-streamlit
-openpyxl
+statsmodels
+plotly
