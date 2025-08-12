@@ -4,6 +4,7 @@ import numpy as np
 import statsmodels.api as sm
 import streamlit as st
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 # =========================================
 # Page setup
@@ -18,24 +19,48 @@ st.markdown(
 )
 
 # =========================================
-# Load & prep data
+# Load & prep data (robust to upload vs local file)
 # =========================================
 with st.sidebar:
     st.header("Data source")
-    default_path = r"C:\Users\AC03537\OneDrive - Alberta Central\Desktop\DSGE.xlsx"
-    xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"])
-    file_path = xlf if xlf is not None else default_path
+    xlf = st.file_uploader("Upload DSGE.xlsx (preferred)", type=["xlsx"])
     st.caption("Sheets required: 'IS Curve', 'Phillips', 'Taylor' (Date format: YYYY-MM)")
 
+    # Optional: allow a local fallback when running on your own machine
+    local_fallback = st.text_input(
+        "OR type a local path to DSGE.xlsx (optional). If left as 'DSGE.xlsx', I'll search the app folder.",
+        value="DSGE.xlsx"
+    )
+
 @st.cache_data(show_spinner=True)
-def load_and_prepare(file_like):
-    is_df = pd.read_excel(file_like, sheet_name="IS Curve")
-    pc_df = pd.read_excel(file_like, sheet_name="Phillips")
-    tr_df = pd.read_excel(file_like, sheet_name="Taylor")
+def load_and_prepare(file_like_or_path):
+    # Guard: require a source
+    if file_like_or_path is None:
+        raise FileNotFoundError(
+            "No file provided. Upload DSGE.xlsx or place DSGE.xlsx in the app folder."
+        )
+
+    # Resolve path if a string/Path was provided
+    if isinstance(file_like_or_path, (str, Path)):
+        p = Path(file_like_or_path)
+        if not p.is_absolute():
+            p = Path.cwd() / p  # relative to where Streamlit runs
+        if not p.exists():
+            raise FileNotFoundError(f"Could not find Excel file at: {p}")
+        excel_src = p
+    else:
+        # Uploaded file-like object (BytesIO)
+        excel_src = file_like_or_path
+
+    # Read sheets
+    is_df = pd.read_excel(excel_src, sheet_name="IS Curve")
+    pc_df = pd.read_excel(excel_src, sheet_name="Phillips")
+    tr_df = pd.read_excel(excel_src, sheet_name="Taylor")
 
     # Parse dates
     for df in (is_df, pc_df, tr_df):
-        df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m")
+        # Expecting YYYY-MM
+        df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
 
     # Merge and index
     df = (
@@ -45,26 +70,39 @@ def load_and_prepare(file_like):
              .set_index("Date")
     )
 
-    # Lags / drivers
-    df["DlogGDP_L1"]       = df["DlogGDP"].shift(1)
-    df["Dlog_CPI_L1"]      = df["Dlog_CPI"].shift(1)
-    df["Nominal_Rate_L1"]  = df["Nominal Rate"].shift(1)
-    df["Real_Rate_L2_data"]= (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
+    # Construct lags / drivers used in models
+    df["DlogGDP_L1"]        = df["DlogGDP"].shift(1)
+    df["Dlog_CPI_L1"]       = df["Dlog_CPI"].shift(1)
+    df["Nominal_Rate_L1"]   = df["Nominal Rate"].shift(1)
+    df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
 
+    # Ensure required columns exist before dropping NA
     required_cols = [
-        "DlogGDP","DlogGDP_L1","Dlog_CPI","Dlog_CPI_L1",
-        "Nominal Rate","Nominal_Rate_L1","Real_Rate_L2_data",
-        "Dlog FD_Lag1","Dlog_REER","Dlog_Energy","Dlog_NonEnergy",
-        "Dlog_Reer_L2","Dlog_Energy_L1","Dlog_Non_Energy_L1"
+        "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
+        "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
+        # IS externals (you should ensure these names match your Excel headers)
+        "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
+        # Phillips externals (lagged)
+        "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise KeyError(
+            f"Missing required columns in merged dataframe: {missing}. "
+            "Check your sheet column names."
+        )
+
     df_est = df.dropna(subset=required_cols).copy()
     if df_est.empty:
         raise ValueError("No rows remain after dropping NA for required columns. Check your data.")
 
     return df, df_est
 
+# Decide the source: uploaded file first, else local fallback path string
+file_source = xlf if xlf is not None else local_fallback
+
 try:
-    df_all, df_est = load_and_prepare(file_path)
+    df_all, df_est = load_and_prepare(file_source)
 except Exception as e:
     st.error(f"Problem loading data: {e}")
     st.stop()
@@ -76,26 +114,26 @@ except Exception as e:
 def fit_models(df_est):
     # IS: DlogGDP_t ~ const + DlogGDP_{t-1} + real_rate_{t-2} + externals
     X_is = sm.add_constant(df_est[[
-        "DlogGDP_L1","Real_Rate_L2_data","Dlog FD_Lag1","Dlog_REER","Dlog_Energy","Dlog_NonEnergy"
+        "DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
     ]])
     y_is = df_est["DlogGDP"]
     model_is = sm.OLS(y_is, X_is).fit()
 
-    # Phillips: DlogCPI_t ~ const + DlogCPI_{t-1} + DlogGDP_{t-1} + externals
+    # Phillips: DlogCPI_t ~ const + DlogCPI_{t-1} + DlogGDP_{t-1} + externals (lagged)
     X_pc = sm.add_constant(df_est[[
-        "Dlog_CPI_L1","DlogGDP_L1","Dlog_Reer_L2","Dlog_Energy_L1","Dlog_Non_Energy_L1"
+        "Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]])
     y_pc = df_est["Dlog_CPI"]
     model_pc = sm.OLS(y_pc, X_pc).fit()
 
-    # Taylor: i_t ~ const + i_{t-1} + DlogCPI_t + DlogGDP_t
-    X_tr = sm.add_constant(df_est[["Nominal_Rate_L1","Dlog_CPI","DlogGDP"]])
+    # Taylor (partial adjustment basis): i_t ~ const + i_{t-1} + DlogCPI_t + DlogGDP_t
+    X_tr = sm.add_constant(df_est[["Nominal_Rate_L1", "Dlog_CPI", "DlogGDP"]])
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
 
-    # Convert to long-run form (to control persistence in simulation)
+    # Convert to long-run coefficients used in simulation target i*
     b0   = float(model_tr.params["const"])
-    rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)  # safety cap
+    rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)  # cap to avoid explosive smoothing
     bpi  = float(model_tr.params["Dlog_CPI"])
     bg   = float(model_tr.params["DlogGDP"])
 
@@ -152,15 +190,17 @@ def build_shocks(T, target, is_size, pc_size, t0, rho):
     pc_arr = np.zeros(T)
     if target == "IS (Demand)":
         is_arr[t0] = is_size
-        for k in range(t0+1, T):
-            is_arr[k] = rho * is_arr[k-1]
+        for k in range(t0 + 1, T):
+            is_arr[k] = rho * is_arr[k - 1]
     elif target == "Phillips (Supply)":
         pc_arr[t0] = pc_size
-        for k in range(t0+1, T):
-            pc_arr[k] = rho * pc_arr[k-1]
+        for k in range(t0 + 1, T):
+            pc_arr[k] = rho * pc_arr[k - 1]
     return is_arr, pc_arr
 
-is_shock_arr, pc_shock_arr = build_shocks(T, shock_target, is_shock_size, pc_shock_size, shock_quarter, shock_persist)
+is_shock_arr, pc_shock_arr = build_shocks(
+    T, shock_target, is_shock_size, pc_shock_size, shock_quarter, shock_persist
+)
 
 # =========================================
 # Simulation
@@ -181,17 +221,19 @@ def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
     phi_pi_star = models["phi_pi_star"]
     phi_g_star  = models["phi_g_star"]
 
-    if is_shock_arr is None: is_shock_arr = np.zeros(T)
-    if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
+    if is_shock_arr is None:
+        is_shock_arr = np.zeros(T)
+    if pc_shock_arr is None:
+        pc_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        # Real rate with 2-quarter lag
-        rr_lag2 = (i[t-2] - p[t-2]) if t >= 2 else real_rate_mean
+        # Real rate with 2-quarter lag (fallback to sample mean early)
+        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean
 
         # IS
         Xis = pd.DataFrame([{
             "const": 1.0,
-            "DlogGDP_L1": g[t-1],
+            "DlogGDP_L1": g[t - 1],
             "Real_Rate_L2_data": rr_lag2,
             "Dlog FD_Lag1": means["Dlog FD_Lag1"],
             "Dlog_REER": means["Dlog_REER"],
@@ -203,17 +245,17 @@ def simulate(T, rho_sim, is_shock_arr=None, pc_shock_arr=None):
         # Phillips
         Xpc = pd.DataFrame([{
             "const": 1.0,
-            "Dlog_CPI_L1": p[t-1],
-            "DlogGDP_L1": g[t-1],
+            "Dlog_CPI_L1": p[t - 1],
+            "DlogGDP_L1": g[t - 1],
             "Dlog_Reer_L2": means["Dlog_Reer_L2"],
             "Dlog_Energy_L1": means["Dlog_Energy_L1"],
             "Dlog_Non_Energy_L1": means["Dlog_Non_Energy_L1"],
         }])
         p[t] = model_pc.predict(Xpc).iloc[0] + pc_shock_arr[t]
 
-        # Taylor (partial adjustment)
+        # Taylor (partial adjustment): i_t = ρ i_{t-1} + (1-ρ) * i*
         i_star = alpha_star + phi_pi_star * p[t] + phi_g_star * g[t]
-        i[t]   = rho_sim * i[t-1] + (1 - rho_sim) * i_star
+        i[t]   = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
     return g, p, i
 
@@ -274,4 +316,4 @@ with st.expander("Model diagnostics (OLS summaries)"):
     st.write("**Phillips Curve**")
     st.text(models["model_pc"].summary().as_text())
     st.write("**Taylor Rule**")
-    st.text(df_est[["Nominal Rate","Nominal_Rate_L1","Dlog_CPI","DlogGDP"]].head(1))  # quick sanity view
+    st.text(models["model_tr"].summary().as_text())
