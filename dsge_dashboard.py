@@ -185,6 +185,9 @@ with st.sidebar:
     is_shock_size = st.number_input("IS shock size (Δ DlogGDP)", value=1.0, step=0.1, format="%.3f")
     pc_shock_size = st.number_input("Phillips shock size (Δ DlogCPI)", value=0.000, step=0.001, format="%.3f")
 
+    st.header("Historical plot options")
+    rate_mode = st.radio("Policy rate line shows…", ["Level", "Change (Δ, pp)"], index=0, horizontal=True)
+
 # =========================================
 # Shocks
 # =========================================
@@ -312,8 +315,8 @@ st.pyplot(fig)
 # =========================================
 # Combined Scenario Plot (optional)
 # =========================================
-# First differences to show nominal rate "growth" in percentage points for scenario chart
-di1 = np.r_[0.0, np.diff(i1)]  # Δi (pp)
+# First differences to show nominal rate "growth" if desired
+di1 = np.r_[0.0, np.diff(i1)]  # scenario Δi in percentage points
 
 fig2 = plt.figure(figsize=(12, 4.5))
 plt.plot(quarters, g1, linewidth=2, label="GDP growth (DlogGDP)")
@@ -329,7 +332,7 @@ plt.tight_layout()
 st.pyplot(fig2)
 
 # =========================================
-# Historical time series (Nominal rate shown as growth %)
+# NEW: Historical time series (like your reference chart)
 # =========================================
 # Build a clean plotting frame from historical data
 df_plot = df_all.copy().reset_index()
@@ -338,22 +341,24 @@ df_plot = df_all.copy().reset_index()
 def to_percent(s: pd.Series) -> pd.Series:
     return s * 100 if s.abs().max() < 5 else s
 
-# GDP and CPI growth (%)
 g_hist = to_percent(df_plot["DlogGDP"])
 p_hist = to_percent(df_plot["Dlog_CPI"])
 
-# Nominal interest rate growth (%): 100 * log change
-# (safe against negative/zero values? If your rate can be zero/negative, use pct_change())
-r_hist = 100 * np.log(df_plot["Nominal Rate"] / df_plot["Nominal Rate"].shift(1))
+if rate_mode == "Change (Δ, pp)":
+    r_hist = df_plot["Nominal Rate"].diff()          # percentage points change
+    rate_label = "Nominal rate change (Δ, pp)"
+else:
+    r_hist = df_plot["Nominal Rate"]                 # level
+    rate_label = "Nominal policy rate (level)"
 
 fig3, ax3 = plt.subplots(figsize=(12, 5))
-ax3.plot(df_plot["Date"], g_hist, linewidth=2, label="GDP growth (%)")
-ax3.plot(df_plot["Date"], p_hist, linewidth=2, label="Inflation (%)")
-ax3.plot(df_plot["Date"], r_hist, linewidth=2, label="Nominal rate growth (%)")
+ax3.plot(df_plot["Date"], g_hist, linewidth=2, label="GDP growth")
+ax3.plot(df_plot["Date"], p_hist, linewidth=2, label="Inflation")
+ax3.plot(df_plot["Date"], r_hist, linewidth=2, label=rate_label)
 
-ax3.set_title("Inflation, GDP Growth, and Nominal Rate Growth — Historical")
+ax3.set_title("Inflation, GDP Growth, and Policy Rate — Historical")
 ax3.set_xlabel("Date")
-ax3.set_ylabel("Growth rate (%)")
+ax3.set_ylabel("Percent / Percentage points")
 ax3.grid(True, alpha=0.3)
 ax3.legend()
 
@@ -374,3 +379,4 @@ with st.expander("Model diagnostics (OLS summaries)"):
     st.text(models["model_pc"].summary().as_text())
     st.write("**Taylor Rule**")
     st.text(models["model_tr"].summary().as_text())
+
