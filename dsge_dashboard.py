@@ -4,11 +4,12 @@
 #   1) Original model (DSGE.xlsx): DlogGDP, Dlog_CPI, Taylor
 #   2) NK model (DSGE_Model2.xlsx): Output Gap, Inflation Rate, Taylor
 #
-# Changes in this version:
-# - No steady-state initialization or lines on charts
-# - "Scenario" renamed to "Shock" throughout
-# - Nominal interest rate auto-converted from % levels to DECIMAL for estimation
-# - Plots show Baseline vs Shock responses
+# This version:
+# - No steady-state lines/logic
+# - "Scenario" renamed to "Shock"
+# - Nominal interest rate shown in DECIMAL units in plots (not %)
+# - GDP/CPI shown in % for readability
+# - Nominal rate auto-converted from percent levels to DECIMAL for estimation
 # -----------------------------------------------------------
 
 import pandas as pd
@@ -27,7 +28,8 @@ st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 st.markdown(
     "- **Dlog** variables (GDP, CPI/Inflation) are treated as **decimals** (e.g., 0.025 = 2.5%).\n"
     "- **Nominal Interest Rate** is auto-converted from percent levels (e.g., 3.34) to **decimal** (0.0334) for estimation.\n"
-    "- Charts display **Baseline** vs **Shock** impulse responses."
+    "- Charts display **Baseline** vs **Shock** impulse responses.\n"
+    "- GDP/CPI are plotted in **%**; **Nominal rate is plotted in decimal units**."
 )
 
 # =========================
@@ -221,7 +223,7 @@ def build_shocks_original(T, target, is_size_pp, pc_size_pp, t0, rho):
         for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
     return is_arr, pc_arr
 
-def simulate_original(T, rho_sim, df_est, models, means, i_neutral_dec, real_rate_mean_dec, is_shock_arr=None, pc_shock_arr=None):
+def simulate_original(T, rho_sim, df_est, models, means, i_mean_dec, real_rate_mean_dec, is_shock_arr=None, pc_shock_arr=None):
     g = np.zeros(T)  # DlogGDP (decimal)
     p = np.zeros(T)  # DlogCPI (decimal)
     i = np.zeros(T)  # Nominal rate (decimal)
@@ -229,7 +231,7 @@ def simulate_original(T, rho_sim, df_est, models, means, i_neutral_dec, real_rat
     # Initialize at sample means (no explicit steady state)
     g[0] = float(df_est["DlogGDP"].mean())
     p[0] = float(df_est["Dlog_CPI"].mean())
-    i[0] = i_neutral_dec
+    i[0] = i_mean_dec
 
     model_is = models["model_is"]; model_pc = models["model_pc"]
     alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_g_star = models["phi_g_star"]
@@ -394,8 +396,8 @@ def fit_models_model2(df_est):
     pc_ok = X_pc.dropna().index.intersection(y_pc.dropna().index)
     model_pc = sm.OLS(y_pc.loc[pc_ok], X_pc.loc[pc_ok]).fit()
 
-    # Taylor: i_t (decimal) on i_{t-1} (decimal), inflation gap (decimal), y_t (pp)
-    infl_gap = df_est["Inflation Rate"] - float(df_est["Inflation Rate"].mean())  # gap from sample mean (no target/steady state)
+    # Taylor: i_t (decimal) on i_{t-1} (decimal), inflation gap from mean (decimal), y_t (pp)
+    infl_gap = df_est["Inflation Rate"] - float(df_est["Inflation Rate"].mean())
     X_tr = sm.add_constant(pd.DataFrame({
         "Nominal Rate_L1": df_est["Nominal Rate_L1"],
         "Inflation Gap": infl_gap,
@@ -514,7 +516,7 @@ try:
         g0, p0, i0 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec)
         gS, pS, iS = simulate_original(T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, is_arr, pc_arr)
 
-        # Plot IRFs (display in %)
+        # Plot IRFs: GDP/CPI in %, Nominal i in DECIMAL
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
         quarters = np.arange(T); vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
@@ -531,10 +533,10 @@ try:
         axes[1].set_title("Inflation (DlogCPI, %)"); axes[1].set_ylabel("%")
         axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-        axes[2].plot(quarters, i0*100, label="Baseline", linewidth=2)
-        axes[2].plot(quarters, iS*100, label="Shock", linewidth=2)
+        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, iS, label="Shock", linewidth=2)
         axes[2].axvline(shock_quarter, **vline_kwargs)
-        axes[2].set_title("Nominal Policy Rate (%)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("%")
+        axes[2].set_title("Nominal Policy Rate (decimal)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("decimal")
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
         plt.tight_layout(); st.pyplot(fig)
@@ -568,7 +570,7 @@ try:
         y0, p0, i0 = simulate_model2(T, rho_sim, df_est, models2, means2, anchors)
         yS, pS, iS = simulate_model2(T, rho_sim, df_est, models2, means2, anchors, is_arr2, pc_arr2)
 
-        # Plot IRFs (display: y in pp, p/i in %)
+        # Plot IRFs: y in pp; p in %; i in DECIMAL
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
         quarters = np.arange(T); vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
@@ -585,10 +587,10 @@ try:
         axes[1].set_title("Inflation (%)"); axes[1].set_ylabel("%")
         axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-        axes[2].plot(quarters, i0*100, label="Baseline", linewidth=2)
-        axes[2].plot(quarters, iS*100, label="Shock", linewidth=2)
+        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, iS, label="Shock", linewidth=2)
         axes[2].axvline(shock_quarter, **vline_kwargs)
-        axes[2].set_title("Nominal Policy Rate (%)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("%")
+        axes[2].set_title("Nominal Policy Rate (decimal)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("decimal")
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
         plt.tight_layout(); st.pyplot(fig)
@@ -602,5 +604,4 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
-
 
