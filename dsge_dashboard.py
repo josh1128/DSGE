@@ -1,13 +1,14 @@
 # dsge_dashboard.py
 # -----------------------------------------------------------
-# One Streamlit app that can run:
-#   1) Original model (DSGE.xlsx): DlogGDP, Dlog_CPI, Taylor
-#   2) NK model (DSGE_Model2.xlsx): Output Gap, Inflation, Taylor with pi* = 2%
+# Streamlit app that runs:
+#   (A) Original model (DSGE.xlsx): DlogGDP, Dlog_CPI, Taylor
+#   (B) NK model (DSGE_Model2.xlsx): Output Gap, Inflation Rate, Taylor with pi* = 2%
 #
-# Fixes:
-# - Auto-scale growth rates to percentage points (pp) if given in decimals
-# - NK loader robust to header spacing/case; fills missing via interpolation + edge-fill
-# - Taylor target inflation fixed at 2%
+# Key changes:
+# - Dlog series (GDP, CPI) remain in DECIMALS (e.g., 0.025 = 2.5%)
+# - Nominal Interest Rate auto-converted from LEVELS (e.g., 3.34%) to DECIMAL (0.0334)
+# - Simulation steady states: DlogGDP=0, Inflation=0.02, Nominal=i_neutral (decimal mean)
+# - IRFs plotted in %/pp, but internals are decimals
 # -----------------------------------------------------------
 
 import pandas as pd
@@ -20,33 +21,32 @@ from pathlib import Path
 # =========================
 # Global config
 # =========================
-TARGET_PI = 2.0  # percent (NK model target inflation)
+TARGET_PI_DEC = 0.02  # 2% in DECIMAL units
 
 # =========================
 # Page setup
 # =========================
 st.set_page_config(page_title="DSGE Model Dashboard", layout="wide")
-st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
+st.title("DSGE IRF Dashboard — IS, Phillips, Taylor (Decimals inside, % on charts)")
 
 st.markdown(
-    "Pick a model and upload the matching Excel file (or place it next to this script).\n\n"
-    "- **Original (DSGE.xlsx)** uses DlogGDP/Dlog_CPI. We auto-scale these to **pp** if they look like decimals.\n"
-    "- **NK (DSGE_Model2.xlsx)** uses Output Gap / Inflation Rate. We auto-scale to **pp**, clean headers, and fill NAs.\n"
-    "Policy responds via a partial-adjustment Taylor rule."
+    "- **Dlog** variables (GDP, CPI/Inflation) are treated as **decimals** (0.025 = 2.5%).\n"
+    "- **Nominal Interest Rate** is auto-converted from levels (e.g., 3.34) to **decimal** (0.0334) if needed.\n"
+    "- **Steady states** used in simulation: DlogGDP=0, Inflation=2% (0.02), Nominal=neutral (mean, decimal).\n"
 )
 
 # =========================
 # Helpers
 # =========================
-def to_pp(series: pd.Series) -> pd.Series:
+def ensure_decimal_rate(series: pd.Series) -> pd.Series:
     """
-    Ensure a rate is in percentage points (pp).
-    If the series looks like a decimal rate (abs max < 5), multiply by 100.
-    Works well for quarterly growth/inflation series near 0–3%.
+    Ensure a rate is in DECIMAL units.
+    If the series looks like % levels (typical magnitudes > 1), divide by 100.
+    Examples: 3.34 -> 0.0334; 0.0334 stays 0.0334.
     """
-    s = series.astype(float)
-    if np.nanmax(np.abs(s.values)) < 5:
-        return s * 100.0
+    s = pd.to_numeric(series, errors="coerce")
+    if np.nanmedian(np.abs(s.values)) > 1.0:  # likely % in levels
+        return s / 100.0
     return s
 
 def _normalize_name(s: str) -> str:
@@ -67,7 +67,7 @@ CANONICAL_MAP = {
 }
 
 def standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Trim/collapse spaces and map to canonical names when recognized."""
+    """Trim/collapse spaces and map to canonical names when recognized (NK path)."""
     cleaned = []
     for c in df.columns:
         norm = _normalize_name(str(c))
@@ -101,12 +101,14 @@ with st.sidebar:
     st.header("Shock")
     if "Original" in model_choice:
         shock_target = st.selectbox("Apply shock to", ["None", "IS (Demand)", "Phillips (Supply)"], index=0)
-        is_shock_size = st.number_input("IS shock size (Δ DlogGDP, pp)", value=1.0, step=0.1, format="%.2f")
-        pc_shock_size = st.number_input("Phillips shock size (Δ DlogCPI, pp)", value=0.00, step=0.05, format="%.2f")
+        # Enter shock sizes in **percentage points** for readability
+        is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f")
+        pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f")
     else:
         shock_target = st.selectbox("Apply shock to", ["None", "IS (Output Gap)", "Phillips (Inflation)"], index=0)
-        is_shock_size = st.number_input("IS shock size (Δ Output Gap, pp)", value=0.50, step=0.1, format="%.2f")
-        pc_shock_size = st.number_input("Phillips shock size (Δ Inflation, pp)", value=0.10, step=0.05, format="%.2f")
+        # Output gap is in pp; inflation entered in pp; we'll convert inflation pp to decimal internally
+        is_shock_size_pp = st.number_input("IS shock (Δ Output Gap, pp)", value=0.50, step=0.10, format="%.2f")
+        pc_shock_size_pp = st.number_input("Phillips shock (Δ Inflation, pp)", value=0.10, step=0.05, format="%.2f")
 
     shock_quarter = st.slider("Shock timing (t)", min_value=1, max_value=T-1, value=1, step=1)
     shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
@@ -130,13 +132,16 @@ def load_and_prepare_original(file_like_or_path):
     else:
         excel_src = file_like_or_path
 
+    # Read sheets
     is_df = pd.read_excel(excel_src, sheet_name="IS Curve")
     pc_df = pd.read_excel(excel_src, sheet_name="Phillips")
     tr_df = pd.read_excel(excel_src, sheet_name="Taylor")
 
+    # Dates (YYYY-MM)
     for df in (is_df, pc_df, tr_df):
         df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
 
+    # Merge
     df = (
         is_df.merge(pc_df, on="Date", how="inner")
              .merge(tr_df, on="Date", how="inner")
@@ -144,11 +149,11 @@ def load_and_prepare_original(file_like_or_path):
              .set_index("Date")
     )
 
-    # --- SCALE core rates to pp if needed ---
-    df["DlogGDP"] = to_pp(df["DlogGDP"])
-    df["Dlog_CPI"] = to_pp(df["Dlog_CPI"])
+    # Convert Nominal Rate to DECIMAL if it's in levels
+    df["Nominal Rate"] = ensure_decimal_rate(df["Nominal Rate"])
 
-    # Lags / transforms AFTER scaling
+    # Dlog series are already in DECIMAL (e.g., 0.025); leave as-is.
+    # Build lags/transforms
     df["DlogGDP_L1"]        = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"]       = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"]   = df["Nominal Rate"].shift(1)
@@ -157,12 +162,14 @@ def load_and_prepare_original(file_like_or_path):
     required_cols = [
         "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
         "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
+        # IS externals
         "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
+        # Phillips externals (lagged)
         "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
-        raise KeyError(f"Missing required columns: {missing}. Adjust required_cols/X matrices to match Excel headers.")
+        raise KeyError(f"Missing required columns: {missing}")
 
     df_est = df.dropna(subset=required_cols).copy()
     if df_est.empty:
@@ -186,7 +193,7 @@ def fit_models_original(df_est):
     y_pc = df_est["Dlog_CPI"]
     model_pc = sm.OLS(y_pc, X_pc).fit()
 
-    # Taylor (partial adjustment)
+    # Taylor (partial adjustment) — all in DECIMALS
     X_tr = sm.add_constant(df_est[["Nominal_Rate_L1", "Dlog_CPI", "DlogGDP"]])
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
@@ -206,22 +213,33 @@ def fit_models_original(df_est):
         "model_tr": model_tr,
         "alpha_star": alpha_star,
         "phi_pi_star": phi_pi_star,
-        "phi_g_star": phi_g_star
+        "phi_g_star": phi_g_star,
+        "rhoh": rhoh
     }
 
-def build_shocks_original(T, target, is_size, pc_size, t0, rho):
-    is_arr = np.zeros(T); pc_arr = np.zeros(T)
+def build_shocks_original(T, target, is_size_pp, pc_size_pp, t0, rho):
+    """
+    Inputs are in percentage points (pp). Convert to DECIMAL for Dlog variables.
+    """
+    is_arr = np.zeros(T)
+    pc_arr = np.zeros(T)
     if target == "IS (Demand)":
-        is_arr[t0] = is_size
+        is_arr[t0] = is_size_pp / 100.0
         for k in range(t0 + 1, T): is_arr[k] = rho * is_arr[k - 1]
     elif target == "Phillips (Supply)":
-        pc_arr[t0] = pc_size
+        pc_arr[t0] = pc_size_pp / 100.0
         for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
     return is_arr, pc_arr
 
-def simulate_original(T, rho_sim, df_est, models, means, i_neutral, real_rate_mean, is_shock_arr=None, pc_shock_arr=None):
-    g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
-    g[0] = float(df_est["DlogGDP"].mean()); p[0] = float(df_est["Dlog_CPI"].mean()); i[0] = i_neutral
+def simulate_original(T, rho_sim, df_est, models, means, i_neutral_dec, real_rate_mean_dec, is_shock_arr=None, pc_shock_arr=None):
+    g = np.zeros(T)  # DlogGDP (decimal)
+    p = np.zeros(T)  # DlogCPI (decimal)
+    i = np.zeros(T)  # Nominal rate (decimal)
+
+    # Steady-state initialization (requested)
+    g[0] = 0.0
+    p[0] = TARGET_PI_DEC
+    i[0] = i_neutral_dec
 
     model_is = models["model_is"]; model_pc = models["model_pc"]
     alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_g_star = models["phi_g_star"]
@@ -230,7 +248,7 @@ def simulate_original(T, rho_sim, df_est, models, means, i_neutral, real_rate_me
     if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean
+        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
 
         Xis = pd.DataFrame([{
             "const": 1.0,
@@ -241,7 +259,7 @@ def simulate_original(T, rho_sim, df_est, models, means, i_neutral, real_rate_me
             "Dlog_Energy": means["Dlog_Energy"],
             "Dlog_NonEnergy": means["Dlog_NonEnergy"],
         }])
-        g[t] = model_is.predict(Xis).iloc[0] + is_shock_arr[t]
+        g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
 
         Xpc = pd.DataFrame([{
             "const": 1.0,
@@ -251,7 +269,7 @@ def simulate_original(T, rho_sim, df_est, models, means, i_neutral, real_rate_me
             "Dlog_Energy_L1": means["Dlog_Energy_L1"],
             "Dlog_Non_Energy_L1": means["Dlog_Non_Energy_L1"],
         }])
-        p[t] = model_pc.predict(Xpc).iloc[0] + pc_shock_arr[t]
+        p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
         i_star = alpha_star + phi_pi_star * p[t] + phi_g_star * g[t]
         i[t]   = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
@@ -292,6 +310,7 @@ def load_and_prepare_model2(file_like_or_path):
 
     is_df, pc_df, tr_df = _read_sheets_flex(excel_src)
 
+    # Parse diverse date formats
     def parse_date(series):
         out = pd.to_datetime(series, format="%Y-%m", errors="coerce")
         if out.isna().all():
@@ -306,10 +325,10 @@ def load_and_prepare_model2(file_like_or_path):
             raise KeyError("Each sheet must contain a 'Date' column.")
         df["Date"] = parse_date(df["Date"])
 
+    # Validate column presence (after standardization)
     is_cols = ["Date", "Output Gap", "Nominal Rate", "Inflation Rate", "Foreign Demand", "Non-Energy", "Energy", "REER"]
     pc_cols = ["Date", "Inflation Rate", "Output Gap", "Foreign Demand", "Non-Energy", "Energy", "REER"]
     tr_cols = ["Date", "Nominal Rate", "Inflation Gap", "Output Gap"]
-
     for need, df, label in [(is_cols, is_df, "IS Curve"), (pc_cols, pc_df, "Phillips"), (tr_cols, tr_df, "Taylor")]:
         missing = [c for c in need if c not in df.columns]
         if missing:
@@ -325,30 +344,29 @@ def load_and_prepare_model2(file_like_or_path):
 
     # Canonical frame (prefer IS externals + Taylor nominal rate)
     df = pd.DataFrame(index=merged.index)
-    df["Output Gap"]     = merged["Output Gap_IS"]
-    df["Inflation Rate"] = merged["Inflation Rate_IS"]
+    df["Output Gap"]     = merged["Output Gap_IS"]     # typically pp; leave as is
+    df["Inflation Rate"] = merged["Inflation Rate_IS"] # may be decimal or %
     df["Nominal Rate"]   = merged["Nominal Rate_Taylor"] if "Nominal Rate_Taylor" in merged else merged["Nominal Rate_IS"]
     df["Foreign Demand"] = merged["Foreign Demand_IS"]
     df["Non-Energy"]     = merged["Non-Energy_IS"]
     df["Energy"]         = merged["Energy_IS"]
     df["REER"]           = merged["REER_IS"]
     if "Inflation Gap" in merged.columns:
-        df["Inflation Gap"] = merged["Inflation Gap"]  # informative only
+        df["Inflation Gap"] = merged["Inflation Gap"]  # not used in estimation
 
     # Fill NAs (interpolate + edge-fill)
     df = df.interpolate(method="linear", limit_direction="both").ffill().bfill()
 
-    # --- SCALE to pp if needed ---
-    df["Output Gap"]     = to_pp(df["Output Gap"])
-    df["Inflation Rate"] = to_pp(df["Inflation Rate"])
-    # Nominal Rate stays as a % level
+    # Convert Inflation Rate and Nominal Rate to DECIMAL if needed
+    df["Inflation Rate"] = ensure_decimal_rate(df["Inflation Rate"])
+    df["Nominal Rate"]   = ensure_decimal_rate(df["Nominal Rate"])
 
-    # Lags & helpers AFTER scaling
-    df["Real Rate"]         = df["Nominal Rate"] - df["Inflation Rate"]
-    df["Output Gap_L1"]     = df["Output Gap"].shift(1)
-    df["Inflation Rate_L1"] = df["Inflation Rate"].shift(1)
-    df["Nominal Rate_L1"]   = df["Nominal Rate"].shift(1)
-    df["Real Rate_L1"]      = df["Real Rate"].shift(1)
+    # Helpers & lags (all DECIMALS except output gap which is pp by construction)
+    df["Real Rate"]         = df["Nominal Rate"] - df["Inflation Rate"]  # decimal
+    df["Output Gap_L1"]     = df["Output Gap"].shift(1)                  # pp
+    df["Inflation Rate_L1"] = df["Inflation Rate"].shift(1)              # decimal
+    df["Nominal Rate_L1"]   = df["Nominal Rate"].shift(1)                # decimal
+    df["Real Rate_L1"]      = df["Real Rate"].shift(1)                   # decimal
 
     req_for_est = [
         "Output Gap", "Output Gap_L1", "Real Rate_L1",
@@ -364,7 +382,7 @@ def load_and_prepare_model2(file_like_or_path):
 
 @st.cache_data(show_spinner=True)
 def fit_models_model2(df_est):
-    # IS: y_t on y_{t-1}, r_{t-1}, externals (L1)
+    # IS: y_t (pp) on y_{t-1} (pp), r_{t-1} (decimal), externals (lagged)
     X_is = sm.add_constant(pd.DataFrame({
         "Output Gap_L1": df_est["Output Gap_L1"],
         "Real Rate_L1": df_est["Real Rate_L1"],
@@ -377,7 +395,7 @@ def fit_models_model2(df_est):
     is_ok = X_is.dropna().index.intersection(y_is.dropna().index)
     model_is = sm.OLS(y_is.loc[is_ok], X_is.loc[is_ok]).fit()
 
-    # Phillips: pi_t on pi_{t-1}, y_{t-1}, externals (L1)
+    # Phillips: pi_t (decimal) on pi_{t-1} (decimal), y_{t-1} (pp), externals
     X_pc = sm.add_constant(pd.DataFrame({
         "Inflation Rate_L1": df_est["Inflation Rate_L1"],
         "Output Gap_L1": df_est["Output Gap_L1"],
@@ -390,8 +408,8 @@ def fit_models_model2(df_est):
     pc_ok = X_pc.dropna().index.intersection(y_pc.dropna().index)
     model_pc = sm.OLS(y_pc.loc[pc_ok], X_pc.loc[pc_ok]).fit()
 
-    # Taylor (partial adjustment): i_t on i_{t-1}, (pi_t - TARGET_PI), y_t
-    infl_gap = df_est["Inflation Rate"] - TARGET_PI
+    # Taylor: i_t (decimal) on i_{t-1} (decimal), (pi_t - 0.02), y_t (pp)
+    infl_gap = df_est["Inflation Rate"] - TARGET_PI_DEC
     X_tr = sm.add_constant(pd.DataFrame({
         "Nominal Rate_L1": df_est["Nominal Rate_L1"],
         "Inflation Gap": infl_gap,
@@ -420,19 +438,32 @@ def fit_models_model2(df_est):
         "rhoh": rhoh
     }
 
-def build_shocks_model2(T, target, is_size, pc_size, t0, rho):
-    is_arr = np.zeros(T); pc_arr = np.zeros(T)
+def build_shocks_model2(T, target, is_size_pp, pc_size_pp, t0, rho):
+    """
+    Output gap shock is in pp; Inflation shock entered in pp but converted to DECIMAL.
+    """
+    is_arr = np.zeros(T)
+    pc_arr = np.zeros(T)
     if target == "IS (Output Gap)":
-        is_arr[t0] = is_size
+        is_arr[t0] = is_size_pp  # pp (matches y units)
         for k in range(t0 + 1, T): is_arr[k] = rho * is_arr[k - 1]
     elif target == "Phillips (Inflation)":
-        pc_arr[t0] = pc_size
+        pc_arr[t0] = pc_size_pp / 100.0  # decimal
         for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
     return is_arr, pc_arr
 
 def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=None, pc_shock_arr=None):
+    """
+    y[t]: Output Gap (pp)
+    p[t]: Inflation Rate (decimal)
+    i[t]: Nominal Rate (decimal)
+    """
     y = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
-    y[0], p[0], i[0] = anchors["y_gap_mean"], anchors["pi_mean"], anchors["i_neutral"]
+
+    # Steady states
+    y[0] = 0.0
+    p[0] = TARGET_PI_DEC
+    i[0] = anchors["i_neutral_dec"]
 
     model_is = models["model_is"]; model_pc = models["model_pc"]
     alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_y_star = models["phi_y_star"]
@@ -441,7 +472,7 @@ def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=No
     if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        rr_l1 = (i[t - 1] - p[t - 1])
+        rr_l1 = (i[t - 1] - p[t - 1])  # decimal
 
         Xis = pd.DataFrame([{
             "const": 1.0,
@@ -465,7 +496,7 @@ def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=No
         }])
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
-        pi_gap_t = p[t] - TARGET_PI
+        pi_gap_t = p[t] - TARGET_PI_DEC
         i_star = alpha_star + phi_pi_star * pi_gap_t + phi_y_star * y[t]
         i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
@@ -480,9 +511,9 @@ try:
         df_all, df_est = load_and_prepare_original(file_source)
         models_o = fit_models_original(df_est)
 
-        # Anchors & means
-        i_neutral      = float(df_est["Nominal Rate"].mean())
-        real_rate_mean = float(df_est["Real_Rate_L2_data"].mean())
+        # Anchors & means (all in DECIMALS where applicable)
+        i_neutral_dec = float(df_est["Nominal Rate"].mean())
+        real_rate_mean_dec = float(df_est["Real_Rate_L2_data"].mean())
         means_o = {
             "Dlog FD_Lag1":       float(df_est["Dlog FD_Lag1"].mean()),
             "Dlog_REER":          float(df_est["Dlog_REER"].mean()),
@@ -493,35 +524,38 @@ try:
             "Dlog_Non_Energy_L1": float(df_est["Dlog_Non_Energy_L1"].mean()),
         }
 
-        # Shocks & simulate
-        is_arr, pc_arr = build_shocks_original(T, shock_target, is_shock_size, pc_shock_size, shock_quarter, shock_persist)
-        g0, p0, i0 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_neutral, real_rate_mean)
-        g1, p1, i1 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_neutral, real_rate_mean, is_arr, pc_arr)
+        # Shocks (entered in pp → convert to decimal here)
+        is_arr, pc_arr = build_shocks_original(T, shock_target, is_shock_size_pp, pc_shock_size_pp, shock_quarter, shock_persist)
 
-        # Plot IRFs
+        # Simulate
+        g0, p0, i0 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_neutral_dec, real_rate_mean_dec)
+        g1, p1, i1 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_neutral_dec, real_rate_mean_dec, is_arr, pc_arr)
+
+        # Plot IRFs (display in %/pp)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
         quarters = np.arange(T); vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
-        axes[0].plot(quarters, g0, label="Baseline", linewidth=2)
-        axes[0].plot(quarters, g1, label="Scenario", linewidth=2)
-        axes[0].axhline(float(df_est["DlogGDP"].mean()), ls="--", color="gray", label="Steady State")
+        axes[0].plot(quarters, g0*100, label="Baseline", linewidth=2)
+        axes[0].plot(quarters, g1*100, label="Scenario", linewidth=2)
+        axes[0].axhline(0.0, ls="--", color="gray", label="Steady State (0)")
         axes[0].axvline(shock_quarter, **vline_kwargs)
-        axes[0].set_title("Real GDP Growth (DlogGDP, pp)"); axes[0].set_ylabel("pp")
-        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
+        axes[0].set_title("Real GDP Growth (DlogGDP, %)")
+        axes[0].set_ylabel("%"); axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
 
-        axes[1].plot(quarters, p0, label="Baseline", linewidth=2)
-        axes[1].plot(quarters, p1, label="Scenario", linewidth=2)
-        axes[1].axhline(float(df_est["Dlog_CPI"].mean()), ls="--", color="gray", label="Steady State")
+        axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
+        axes[1].plot(quarters, p1*100, label="Scenario", linewidth=2)
+        axes[1].axhline(TARGET_PI_DEC*100, ls="--", color="gray", label="Target π* = 2%")
         axes[1].axvline(shock_quarter, **vline_kwargs)
-        axes[1].set_title("Inflation Rate (DlogCPI, pp)"); axes[1].set_ylabel("pp")
-        axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
+        axes[1].set_title("Inflation (DlogCPI, %)")
+        axes[1].set_ylabel("%"); axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
-        axes[2].plot(quarters, i1, label="Scenario", linewidth=2)
-        axes[2].axhline(i_neutral, ls="--", color="gray", label="Neutral Rate")
+        axes[2].plot(quarters, i0*100, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, i1*100, label="Scenario", linewidth=2)
+        axes[2].axhline(i_neutral_dec*100, ls="--", color="gray", label="Neutral i")
         axes[2].axvline(shock_quarter, **vline_kwargs)
-        axes[2].set_title("Nominal Policy Rate (%)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("%")
+        axes[2].set_title("Nominal Policy Rate (%)")
+        axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("%")
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
         plt.tight_layout(); st.pyplot(fig)
@@ -538,46 +572,49 @@ try:
         models2 = fit_models_model2(df_est)
 
         # Anchors & means
+        i_neutral_dec = float(df_est["Nominal Rate"].mean())         # decimal
+        y_gap_mean_pp = float(df_est["Output Gap"].mean())           # pp (not used for steady state now)
+        pi_mean_dec   = float(df_est["Inflation Rate"].mean())       # decimal (not used for steady state now)
         means2 = {
             "Foreign Demand": float(df_est["Foreign Demand"].mean()),
             "Non-Energy": float(df_est["Non-Energy"].mean()),
             "Energy": float(df_est["Energy"].mean()),
             "REER": float(df_est["REER"].mean()),
         }
-        i_neutral2 = float(df_est["Nominal Rate"].mean())
-        y_gap_mean = float(df_est["Output Gap"].mean())
-        pi_mean    = float(df_est["Inflation Rate"].mean())
-        anchors = {"i_neutral": i_neutral2, "y_gap_mean": y_gap_mean, "pi_mean": pi_mean}
+        anchors = {"i_neutral_dec": i_neutral_dec}
 
-        # Shocks & simulate
-        is_arr2, pc_arr2 = build_shocks_model2(T, shock_target, is_shock_size, pc_shock_size, shock_quarter, shock_persist)
+        # Shocks (IS in pp; Phillips in pp→decimal)
+        is_arr2, pc_arr2 = build_shocks_model2(T, shock_target, is_shock_size_pp, pc_shock_size_pp, shock_quarter, shock_persist)
+
+        # Simulate
         y0, p0, i0 = simulate_model2(T, rho_sim, df_est, models2, means2, anchors)
         y1, p1, i1 = simulate_model2(T, rho_sim, df_est, models2, means2, anchors, is_arr2, pc_arr2)
 
-        # Plot IRFs
+        # Plot IRFs (display: y in pp, p and i in %)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
         quarters = np.arange(T); vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
         axes[0].plot(quarters, y0, label="Baseline", linewidth=2)
         axes[0].plot(quarters, y1, label="Scenario", linewidth=2)
-        axes[0].axhline(y_gap_mean, ls="--", color="gray", label="Steady State")
+        axes[0].axhline(0.0, ls="--", color="gray", label="Steady State (0)")
         axes[0].axvline(shock_quarter, **vline_kwargs)
-        axes[0].set_title("Output Gap (pp)"); axes[0].set_ylabel("pp")
-        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
+        axes[0].set_title("Output Gap (pp)")
+        axes[0].set_ylabel("pp"); axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
 
-        axes[1].plot(quarters, p0, label="Baseline", linewidth=2)
-        axes[1].plot(quarters, p1, label="Scenario", linewidth=2)
-        axes[1].axhline(pi_mean, ls="--", color="gray", label="Steady State")
+        axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
+        axes[1].plot(quarters, p1*100, label="Scenario", linewidth=2)
+        axes[1].axhline(TARGET_PI_DEC*100, ls="--", color="gray", label="Target π* = 2%")
         axes[1].axvline(shock_quarter, **vline_kwargs)
-        axes[1].set_title("Inflation Rate (pp)"); axes[1].set_ylabel("pp")
-        axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
+        axes[1].set_title("Inflation (%, decimal×100)")
+        axes[1].set_ylabel("%"); axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
-        axes[2].plot(quarters, i1, label="Scenario", linewidth=2)
-        axes[2].axhline(i_neutral2, ls="--", color="gray", label="Neutral Rate")
+        axes[2].plot(quarters, i0*100, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, i1*100, label="Scenario", linewidth=2)
+        axes[2].axhline(i_neutral_dec*100, ls="--", color="gray", label="Neutral i")
         axes[2].axvline(shock_quarter, **vline_kwargs)
-        axes[2].set_title("Nominal Policy Rate (%)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("%")
+        axes[2].set_title("Nominal Policy Rate (%)")
+        axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("%")
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
         plt.tight_layout(); st.pyplot(fig)
