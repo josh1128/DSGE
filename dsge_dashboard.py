@@ -1,4 +1,4 @@
- # dsge_dashboard.py
+# dsge_dashboard.py
 # -----------------------------------------------------------
 # Streamlit app that can run:
 #   1) Original model (DSGE.xlsx): DlogGDP, Dlog_CPI, Taylor
@@ -10,6 +10,8 @@
 # - Nominal interest rate shown in DECIMAL units in plots (not %)
 # - GDP/CPI shown in % for readability
 # - Nominal rate auto-converted from percent levels to DECIMAL for estimation
+# - OPTION A APPLIED for NK model: use Output Gap in FRACTION units (pp/100)
+#   inside Phillips and Taylor *during simulation* to tame inflation amplitude.
 # -----------------------------------------------------------
 
 import pandas as pd
@@ -383,10 +385,10 @@ def fit_models_model2(df_est):
     is_ok = X_is.dropna().index.intersection(y_is.dropna().index)
     model_is = sm.OLS(y_is.loc[is_ok], X_is.loc[is_ok]).fit()
 
-    # Phillips: pi_t (decimal) on pi_{t-1} (decimal), y_{t-1} (pp), externals
+    # Phillips: pi_t (decimal) on pi_{t-1} (decimal), y_{t-1} (pp) + externals
     X_pc = sm.add_constant(pd.DataFrame({
         "Inflation Rate_L1": df_est["Inflation Rate_L1"],
-        "Output Gap_L1": df_est["Output Gap_L1"],
+        "Output Gap_L1": df_est["Output Gap_L1"],  # trained in pp
         "Foreign Demand_L1": df_est["Foreign Demand"].shift(1),
         "NonEnergy_L1": df_est["Non-Energy"].shift(1),
         "Energy_L1": df_est["Energy"].shift(1),
@@ -396,12 +398,12 @@ def fit_models_model2(df_est):
     pc_ok = X_pc.dropna().index.intersection(y_pc.dropna().index)
     model_pc = sm.OLS(y_pc.loc[pc_ok], X_pc.loc[pc_ok]).fit()
 
-    # Taylor: i_t (decimal) on i_{t-1} (decimal), inflation gap from mean (decimal), y_t (pp)
+    # Taylor: i_t (decimal) on i_{t-1} (decimal), inflation gap (decimal), y_t (pp)
     infl_gap = df_est["Inflation Rate"] - float(df_est["Inflation Rate"].mean())
     X_tr = sm.add_constant(pd.DataFrame({
         "Nominal Rate_L1": df_est["Nominal Rate_L1"],
         "Inflation Gap": infl_gap,
-        "Output Gap": df_est["Output Gap"],
+        "Output Gap": df_est["Output Gap"],  # trained in pp
     }))
     y_tr = df_est["Nominal Rate"]
     tr_ok = X_tr.dropna().index.intersection(y_tr.dropna().index)
@@ -414,7 +416,7 @@ def fit_models_model2(df_est):
 
     alpha_star  = b0  / (1 - rhoh)
     phi_pi_star = bpi / (1 - rhoh)
-    phi_y_star  = by  / (1 - rhoh)
+    phi_y_star  = by  / (1 - rhoh)  # NOTE: per *pp* of output gap
 
     return {
         "model_is": model_is,
@@ -422,7 +424,7 @@ def fit_models_model2(df_est):
         "model_tr": model_tr,
         "alpha_star": alpha_star,
         "phi_pi_star": phi_pi_star,
-        "phi_y_star": phi_y_star
+        "phi_y_star": phi_y_star  # still per pp (we'll scale y in simulation)
     }
 
 def build_shocks_model2(T, target, is_size_pp, pc_size_pp, t0, rho):
@@ -441,6 +443,11 @@ def build_shocks_model2(T, target, is_size_pp, pc_size_pp, t0, rho):
 
 def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=None, pc_shock_arr=None):
     """
+    OPTION A IMPLEMENTED HERE:
+      - Keep 'Output Gap' in pp for plotting and IS equation.
+      - Convert Output Gap to FRACTION (pp/100) when feeding into:
+         * Phillips curve (as the activity term)
+         * Taylor rule (as the activity term)
     y[t]: Output Gap (pp)
     p[t]: Inflation Rate (decimal)
     i[t]: Nominal Rate (decimal)
@@ -453,17 +460,18 @@ def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=No
     i[0] = anchors["i_mean_dec"]
 
     model_is = models["model_is"]; model_pc = models["model_pc"]
-    alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_y_star = models["phi_y_star"]
+    alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_y_star = models["phi_y_star"]  # per pp
 
     if is_shock_arr is None: is_shock_arr = np.zeros(T)
     if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
 
     for t in range(1, T):
+        # --- IS (uses pp and real rate in decimals) ---
         rr_l1 = (i[t - 1] - p[t - 1])  # decimal
 
         Xis = pd.DataFrame([{
             "const": 1.0,
-            "Output Gap_L1": y[t - 1],
+            "Output Gap_L1": y[t - 1],                 # pp (as trained)
             "Real Rate_L1": rr_l1,
             "Foreign Demand_L1": means2["Foreign Demand"],
             "NonEnergy_L1": means2["Non-Energy"],
@@ -472,10 +480,12 @@ def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=No
         }])
         y[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
 
+        # --- Phillips (feed OG in FRACTION units) ---
+        og_frac_lag = y[t - 1] / 100.0  # pp -> fraction
         Xpc = pd.DataFrame([{
             "const": 1.0,
             "Inflation Rate_L1": p[t - 1],
-            "Output Gap_L1": y[t - 1],
+            "Output Gap_L1": og_frac_lag,              # scaled at runtime
             "Foreign Demand_L1": means2["Foreign Demand"],
             "NonEnergy_L1": means2["Non-Energy"],
             "Energy_L1": means2["Energy"],
@@ -483,8 +493,11 @@ def simulate_model2(T, rho_sim, df_est, models, means2, anchors, is_shock_arr=No
         }])
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
+        # --- Taylor (feed OG in FRACTION units) ---
+        og_frac_now = y[t] / 100.0  # pp -> fraction
         pi_gap_t = p[t] - anchors["pi_mean_dec"]
-        i_star = alpha_star + phi_pi_star * pi_gap_t + phi_y_star * y[t]
+        # NOTE: phi_y_star is per pp; multiplying by og_frac_now dampens activity channel intentionally (Option A).
+        i_star = alpha_star + phi_pi_star * pi_gap_t + (phi_y_star * og_frac_now)
         i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
     return y, p, i
