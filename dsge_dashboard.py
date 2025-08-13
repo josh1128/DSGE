@@ -1,4 +1,4 @@
-# dsge_dashboard.py
+ # dsge_dashboard.py
 # -----------------------------------------------------------
 # Streamlit app that can run:
 #   1) Original model (DSGE.xlsx): DlogGDP, Dlog_CPI, Taylor
@@ -10,7 +10,6 @@
 # - Nominal interest rate shown in DECIMAL units in plots (not %)
 # - GDP/CPI shown in % for readability
 # - Nominal rate auto-converted from percent levels to DECIMAL for estimation
-# - Phillips (Original) uses Output Gap; Taylor (Original) uses Output_Gap_L2
 # -----------------------------------------------------------
 
 import pandas as pd
@@ -153,21 +152,13 @@ def load_and_prepare_original(file_like_or_path):
     df["Nominal_Rate_L1"]   = df["Nominal Rate"].shift(1)
     df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
 
-    # >>> Added for your request:
-    # Ensure Output Gap column exists and build its L2 lag
-    if "Output Gap" not in df.columns:
-        raise KeyError("Missing required column 'Output Gap' in merged Original model data.")
-    df["Output_Gap_L2"] = df["Output Gap"].shift(2)
-
     required_cols = [
         "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
         "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
         # IS externals
         "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
         # Phillips externals (lagged)
-        "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1",
-        # Added for new specs
-        "Output Gap", "Output_Gap_L2",
+        "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -181,34 +172,33 @@ def load_and_prepare_original(file_like_or_path):
 
 @st.cache_data(show_spinner=True)
 def fit_models_original(df_est):
-    # IS (unchanged): growth on lags & externals
+    # IS
     X_is = sm.add_constant(df_est[[
         "DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
     ]])
     y_is = df_est["DlogGDP"]
     model_is = sm.OLS(y_is, X_is).fit()
 
-    # Phillips — now uses Output Gap (level) instead of DlogGDP
+    # Phillips
     X_pc = sm.add_constant(df_est[[
-        "Dlog_CPI_L1", "Output Gap", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
+        "Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]])
     y_pc = df_est["Dlog_CPI"]
     model_pc = sm.OLS(y_pc, X_pc).fit()
 
-    # Taylor (partial adjustment) — now uses Output_Gap_L2 (pp)
-    X_tr = sm.add_constant(df_est[["Nominal_Rate_L1", "Dlog_CPI", "Output_Gap_L2"]])
+    # Taylor (partial adjustment) — all in DECIMALS
+    X_tr = sm.add_constant(df_est[["Nominal_Rate_L1", "Dlog_CPI", "DlogGDP"]])
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
 
-    # Extract partial-adjustment parameters
     b0   = float(model_tr.params["const"])
     rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)
     bpi  = float(model_tr.params["Dlog_CPI"])
-    by   = float(model_tr.params["Output_Gap_L2"])
+    bg   = float(model_tr.params["DlogGDP"])
 
     alpha_star  = b0  / (1 - rhoh)
     phi_pi_star = bpi / (1 - rhoh)
-    phi_y_star  = by  / (1 - rhoh)
+    phi_g_star  = bg  / (1 - rhoh)
 
     return {
         "model_is": model_is,
@@ -216,7 +206,7 @@ def fit_models_original(df_est):
         "model_tr": model_tr,
         "alpha_star": alpha_star,
         "phi_pi_star": phi_pi_star,
-        "phi_y_star": phi_y_star
+        "phi_g_star": phi_g_star
     }
 
 def build_shocks_original(T, target, is_size_pp, pc_size_pp, t0, rho):
@@ -244,7 +234,7 @@ def simulate_original(T, rho_sim, df_est, models, means, i_mean_dec, real_rate_m
     i[0] = i_mean_dec
 
     model_is = models["model_is"]; model_pc = models["model_pc"]
-    alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_y_star = models["phi_y_star"]
+    alpha_star  = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_g_star = models["phi_g_star"]
 
     if is_shock_arr is None: is_shock_arr = np.zeros(T)
     if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
@@ -263,19 +253,17 @@ def simulate_original(T, rho_sim, df_est, models, means, i_mean_dec, real_rate_m
         }])
         g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
 
-        # Phillips now uses Output Gap (treated exogenous here at sample mean)
         Xpc = pd.DataFrame([{
             "const": 1.0,
             "Dlog_CPI_L1": p[t - 1],
-            "Output Gap": means["Output Gap"],
+            "DlogGDP_L1": g[t - 1],
             "Dlog_Reer_L2": means["Dlog_Reer_L2"],
             "Dlog_Energy_L1": means["Dlog_Energy_L1"],
             "Dlog_Non_Energy_L1": means["Dlog_Non_Energy_L1"],
         }])
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
-        # Taylor uses Output_Gap_L2 (also held at sample mean for Original model)
-        i_star = alpha_star + phi_pi_star * p[t] + phi_y_star * means["Output_Gap_L2"]
+        i_star = alpha_star + phi_pi_star * p[t] + phi_g_star * g[t]
         i[t]   = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
     return g, p, i
@@ -521,9 +509,6 @@ try:
             "Dlog_Reer_L2":       float(df_est["Dlog_Reer_L2"].mean()),
             "Dlog_Energy_L1":     float(df_est["Dlog_Energy_L1"].mean()),
             "Dlog_Non_Energy_L1": float(df_est["Dlog_Non_Energy_L1"].mean()),
-            # Added for new specs
-            "Output Gap":         float(df_est["Output Gap"].mean()),
-            "Output_Gap_L2":      float(df_est["Output_Gap_L2"].mean()),
         }
 
         # Shocks & simulate
