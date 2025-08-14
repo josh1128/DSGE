@@ -2,10 +2,13 @@
 # -----------------------------------------------------------
 # Streamlit app that runs:
 #   1) Original model (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate)
-#      - Taylor uses an inflation gap: (π_t - π*)
-#      - Shocks: IS, Phillips, and Taylor (Policy tightening/easing)
-#      - Policy shock is applied AFTER smoothing (guarantees visible jump on tightening)
-#      - LaTeX equations (with fitted coefficients) shown below charts
+#      - Taylor uses inflation gap (π_t − π*)
+#      - Shocks: IS, Phillips, and Taylor (tightening/easing)
+#      - NEW: Policy shock behavior selector:
+#          • Add after smoothing (default)
+#          • Add to target (inside 1−ρ)
+#          • Force local jump (override)  ← Guarantees an uptick/downtick vs last period
+#      - LaTeX equations shown below charts
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 # -----------------------------------------------------------
 
@@ -25,9 +28,8 @@ st.set_page_config(page_title="DSGE IRF Dashboard", layout="wide")
 st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 
 st.markdown(
-    "- **Original**: GDP & CPI are in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
-    "- **Taylor** uses **inflation gap**: \\(\\pi_t-\\pi^\\*\\).\n"
-    "- **Policy shock** is added **after** smoothing ⇒ tightening always shows an immediate jump up."
+    "- **Original**: GDP & CPI in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
+    "- **Taylor** uses **inflation gap**: \\(\\pi_t - \\pi^*\\)."
 )
 
 # =========================
@@ -141,6 +143,16 @@ with st.sidebar:
         policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d")
         shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1)
         shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
+
+        st.header("Policy shock behavior")
+        policy_mode = st.radio(
+            "Choose how the policy shock is applied",
+            ["Add after smoothing (standard)", "Add to target (inside 1−ρ)", "Force local jump (override)"],
+            index=0,
+            help=("• Add after smoothing: i_t = ρ i_{t-1} + (1−ρ) i*_t + ε_t^{pol}  "
+                  "• Add to target: i_t = ρ i_{t-1} + (1−ρ)(i*_t + ε_t^{pol})  "
+                  "• Force local jump: ensures tightening raises i_t vs i_{t-1} by at least the shock size.")
+        )
 
     else:
         st.header("Simple NK parameters (pp units)")
@@ -275,13 +287,14 @@ def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, 
 def simulate_original(
     T: int, rho_sim: float, df_est: pd.DataFrame, models: Dict[str, sm.regression.linear_model.RegressionResultsWrapper],
     means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float, pi_star_quarterly: float,
-    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None
+    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)"
 ):
     """
-    Simulate paths. Taylor uses inflation gap (π_t - π*) for the target i*_t.
-    **Policy shock is added AFTER smoothing**:
-        i_t = ρ i_{t-1} + (1-ρ) i*_t + ε_t^{pol}
-    This ensures a tightening (ε>0) produces an upward jump regardless of ρ.
+    Policy shock modes:
+      - Add after smoothing: i_t = ρ i_{t-1} + (1−ρ) i*_t + ε_t^{pol}
+      - Add to target:      i_t = ρ i_{t-1} + (1−ρ)( i*_t + ε_t^{pol} )
+      - Force local jump:   compute with 'Add after smoothing', then override to ensure
+                            tightening raises i_t by at least |ε| vs i_{t-1} (and vice versa for easing)
     """
     g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
 
@@ -324,8 +337,27 @@ def simulate_original(
         pi_gap_t = p[t] - pi_star_quarterly
         i_star = alpha_star + phi_pi_star * pi_gap_t + phi_g_star * g[t]
 
-        # >>> POLICY SHOCK ADDED AFTER SMOOTHING <<<
-        i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + policy_shock_arr[t]
+        # --- Apply policy shock according to chosen mode ---
+        eps = policy_shock_arr[t]  # decimal (e.g., 0.0025 = 25 bp)
+
+        if policy_mode.startswith("Add after"):
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
+
+        elif policy_mode.startswith("Add to target"):
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + eps)
+
+        else:  # Force local jump (override)
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
+            # Determine intended direction at this t
+            if eps > 0:  # tightening
+                min_jump = abs(eps)
+                i_raw = max(i_raw, i[t - 1] + min_jump)
+            elif eps < 0:  # easing
+                min_jump = abs(eps)
+                i_raw = min(i_raw, i[t - 1] - min_jump)
+            # if eps == 0, leave as is
+
+        i[t] = float(i_raw)
 
     return g, p, i
 
@@ -366,11 +398,12 @@ try:
             T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
         )
         g0, p0, i0 = simulate_original(
-            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            policy_mode=policy_mode
         )
         gS, pS, iS = simulate_original(
             T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
-            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr
+            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode
         )
 
         # Plot IRFs
@@ -403,10 +436,10 @@ try:
 
         plt.tight_layout(); st.pyplot(fig)
 
-        # Quick readout to confirm sign at impact
+        # Readout at the shock quarter
         if shock_target.startswith("Taylor"):
             delta_i_bp = (iS - i0)[shock_quarter] * 10000.0
-            st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp (ρ={rho_sim:.2f})")
+            st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp  |  mode: {policy_mode}  |  ρ={rho_sim:.2f}")
 
         # ===== LaTeX equations =====
         st.subheader("Estimated Equations (Original model)")
@@ -455,9 +488,14 @@ try:
              .replace("{b5}", fmt_coef(b5))
         )
 
-        # Taylor with shock AFTER smoothing
-        st.markdown("**Taylor Rule (partial adjustment, with inflation gap; shock AFTER smoothing)**")
-        st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t")
+        # Taylor (display matches chosen mode)
+        st.markdown("**Taylor Rule (partial adjustment, with inflation gap)**")
+        if policy_mode.startswith("Add after"):
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t")
+        elif policy_mode.startswith("Add to target"):
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\,\big(i_t^\* + \varepsilon^{\text{pol}}_t\big)")
+        else:
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t \quad (\text{with local-jump override})")
         st.latex(r"i_t^\* \;=\; \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{g}^\*\,g_t")
         st.latex(
             r"""
@@ -518,6 +556,5 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
-
 
 
