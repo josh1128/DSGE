@@ -4,7 +4,7 @@
 #   1) Original model (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate)
 #      - Taylor uses an inflation gap: (π_t - π*)
 #      - Shocks: IS, Phillips, and Taylor (Policy tightening/easing)
-#      - NEW: Policy shock mode selector → "Jump (realized)" or "Target (inside smoothing)"
+#      - Policy shock is applied AFTER smoothing (guarantees visible jump on tightening)
 #      - LaTeX equations (with fitted coefficients) shown below charts
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 # -----------------------------------------------------------
@@ -27,7 +27,7 @@ st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 st.markdown(
     "- **Original**: GDP & CPI are in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
     "- **Taylor** uses **inflation gap**: \\(\\pi_t-\\pi^\\*\\).\n"
-    "- **Policy shock mode**: *Jump (realized)* guarantees an up-tick for tightening regardless of ρ."
+    "- **Policy shock** is added **after** smoothing ⇒ tightening always shows an immediate jump up."
 )
 
 # =========================
@@ -35,7 +35,7 @@ st.markdown(
 # =========================
 def ensure_decimal_rate(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
-    if np.nanmedian(np.abs(s.values)) > 1.0:
+    if np.nanmedian(np.abs(s.values)) > 1.0:  # e.g., 3.2 means 3.2%
         return s / 100.0
     return s
 
@@ -141,15 +141,6 @@ with st.sidebar:
         policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d")
         shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1)
         shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
-
-        st.header("Policy shock mode")
-        policy_mode = st.radio(
-            "How to apply the policy shock?",
-            ["Jump (realized rate)", "Target (inside smoothing)"],
-            index=0,
-            help="Jump = adds bp directly to i_t (guarantees visible up-tick for tightening). "
-                 "Target = adds to target before smoothing."
-        )
 
     else:
         st.header("Simple NK parameters (pp units)")
@@ -284,9 +275,16 @@ def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, 
 def simulate_original(
     T: int, rho_sim: float, df_est: pd.DataFrame, models: Dict[str, sm.regression.linear_model.RegressionResultsWrapper],
     means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float, pi_star_quarterly: float,
-    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Jump (realized rate)"
+    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None
 ):
+    """
+    Simulate paths. Taylor uses inflation gap (π_t - π*) for the target i*_t.
+    **Policy shock is added AFTER smoothing**:
+        i_t = ρ i_{t-1} + (1-ρ) i*_t + ε_t^{pol}
+    This ensures a tightening (ε>0) produces an upward jump regardless of ρ.
+    """
     g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
+
     g[0] = float(df_est["DlogGDP"].mean())
     p[0] = float(df_est["Dlog_CPI"].mean())
     i[0] = i_mean_dec
@@ -322,15 +320,12 @@ def simulate_original(
         }])
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
+        # Taylor target with inflation gap
         pi_gap_t = p[t] - pi_star_quarterly
         i_star = alpha_star + phi_pi_star * pi_gap_t + phi_g_star * g[t]
 
-        if policy_mode.startswith("Jump"):
-            # add shock DIRECTLY to realized i_t (guaranteed visible sign)
-            i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + policy_shock_arr[t]
-        else:
-            # add shock to the target (scaled by 1-ρ)
-            i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + policy_shock_arr[t])
+        # >>> POLICY SHOCK ADDED AFTER SMOOTHING <<<
+        i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + policy_shock_arr[t]
 
     return g, p, i
 
@@ -342,6 +337,7 @@ try:
         file_source = xlf if xlf is not None else (fallback if 'fallback' in locals() else None)
         df_all, df_est = load_and_prepare_original(file_source)
 
+        # Determine π* (quarterly decimal)
         if 'use_sample_mean' in locals() and use_sample_mean:
             pi_star_quarterly = float(df_est["Dlog_CPI"].mean())
             st.info(f"π* set to sample mean of DlogCPI: {pi_star_quarterly:.4f} (quarterly decimal)")
@@ -352,6 +348,7 @@ try:
 
         models_o = fit_models_original(df_est, pi_star_quarterly)
 
+        # Anchors & means
         i_mean_dec = float(df_est["Nominal Rate"].mean())
         real_rate_mean_dec = float(df_est["Real_Rate_L2_data"].mean())
         means_o = {
@@ -369,12 +366,11 @@ try:
             T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
         )
         g0, p0, i0 = simulate_original(
-            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
-            policy_mode=policy_mode
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly
         )
         gS, pS, iS = simulate_original(
             T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
-            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode
+            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr
         )
 
         # Plot IRFs
@@ -410,16 +406,15 @@ try:
         # Quick readout to confirm sign at impact
         if shock_target.startswith("Taylor"):
             delta_i_bp = (iS - i0)[shock_quarter] * 10000.0
-            st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp "
-                    f"(mode: {policy_mode}; ρ={rho_sim:.2f})")
+            st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp (ρ={rho_sim:.2f})")
 
         # ===== LaTeX equations =====
         st.subheader("Estimated Equations (Original model)")
-
         m_is = models_o["model_is"]; m_pc = models_o["model_pc"]; m_tr = models_o["model_tr"]
         alpha_star = models_o["alpha_star"]; phi_pi_star = models_o["phi_pi_star"]; phi_g_star = models_o["phi_g_star"]
         rho_hat = models_o["rho_hat"]
 
+        # IS
         c_is = float(m_is.params["const"])
         a1 = float(m_is.params["DlogGDP_L1"])
         a2 = float(m_is.params["Real_Rate_L2_data"])
@@ -427,7 +422,6 @@ try:
         a4 = float(m_is.params["Dlog_REER"])
         a5 = float(m_is.params["Dlog_Energy"])
         a6 = float(m_is.params["Dlog_NonEnergy"])
-
         st.markdown("**IS Curve (\\(\\Delta \\log GDP_t\\))**")
         st.latex(
             r"""
@@ -441,13 +435,13 @@ try:
              .replace("{a5}", fmt_coef(a5)).replace("{a6}", fmt_coef(a6))
         )
 
+        # Phillips
         c_pc = float(m_pc.params["const"])
         b1 = float(m_pc.params["Dlog_CPI_L1"])
         b2 = float(m_pc.params["DlogGDP_L1"])
         b3 = float(m_pc.params["Dlog_Reer_L2"])
         b4 = float(m_pc.params["Dlog_Energy_L1"])
         b5 = float(m_pc.params["Dlog_Non_Energy_L1"])
-
         st.markdown("**Phillips Curve (\\(\\Delta \\log CPI_t\\))**")
         st.latex(
             r"""
@@ -461,20 +455,13 @@ try:
              .replace("{b5}", fmt_coef(b5))
         )
 
-        st.markdown("**Taylor Rule (partial adjustment, with inflation gap)**")
-        if policy_mode.startswith("Jump"):
-            st.latex(r"i_t = \rho\, i_{t-1} + (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t")
-        else:
-            st.latex(r"i_t = \rho\, i_{t-1} + (1-\rho)\,( i_t^\* + \varepsilon^{\text{pol}}_t )")
+        # Taylor with shock AFTER smoothing
+        st.markdown("**Taylor Rule (partial adjustment, with inflation gap; shock AFTER smoothing)**")
+        st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t")
+        st.latex(r"i_t^\* \;=\; \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{g}^\*\,g_t")
         st.latex(
             r"""
-            i_t^\* \;=\; \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{g}^\*\,g_t
-            \qquad
-            \rho = {rho}\,,\;
-            \alpha^\* = {a}\,,\;
-            \phi_{\pi}^\* = {fp}\,,\;
-            \phi_{g}^\* = {fg}\,,\;
-            \pi^\* = {pistar}
+            \rho = {rho}\,,\quad \alpha^\* = {a}\,,\quad \phi_{\pi}^\* = {fp}\,,\quad \phi_{g}^\* = {fg}\,,\quad \pi^\* = {pistar}
             """.replace("{rho}", f"{rho_hat:.3f}")
              .replace("{a}", f"{alpha_star:.3f}")
              .replace("{fp}", f"{phi_pi_star:.3f}")
@@ -488,7 +475,9 @@ try:
             st.write("**Taylor Rule**"); st.text(m_tr.summary().as_text())
 
     else:
+        # =========================
         # Simple NK (built-in)
+        # =========================
         P = NKParamsSimple(sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
                            rho_i=rho_i, rho_x=rho_x, rho_r=rho_r, rho_u=rho_u, gamma_pi=gamma_pi)
         model = SimpleNK3EqBuiltIn(P)
@@ -529,4 +518,6 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
+
 
