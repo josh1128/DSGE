@@ -2,14 +2,14 @@
 # -----------------------------------------------------------
 # Streamlit app that runs:
 #   1) Original model (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate)
-#      - Taylor rule uses an **inflation gap**: (π_t - π*), where π* is a target.
-#      - Supports shocks to IS, Phillips, and **Taylor (policy tightening)**.
-#      - LaTeX equations (with fitted coefficients) are rendered below each chart.
+#      - Taylor rule uses an inflation gap: (π_t - π*)
+#      - Supports shocks to IS, Phillips, and Taylor (policy tightening or easing)
+#      - LaTeX equations (with fitted coefficients) are rendered below each chart
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 #
 # Notes:
 # - GDP/Inflation shown in PERCENT (%); Nominal policy rate shown in DECIMAL (e.g., 0.03 = 3%).
-# - In Original model, policy shock is entered in **basis points** and added directly to i_t (with AR(1) persistence).
+# - In Original model, policy shock is entered in basis points and added directly to i_t (with AR(1) persistence).
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -152,14 +152,23 @@ with st.sidebar:
         st.header("Shock")
         shock_target = st.selectbox(
             "Apply shock to",
-            ["None", "IS (Demand)", "Phillips (Supply)", "Taylor (Policy tightening)"],
+            [
+                "None",
+                "IS (Demand)",
+                "Phillips (Supply)",
+                "Taylor (Policy tightening)",
+                "Taylor (Policy easing)"
+            ],
             index=0
         )
         is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f")
         pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f")
-        # Policy shock in basis points (bp) -> converted to decimal
-        policy_shock_bp = st.number_input("Policy shock (Δ i, basis points)", value=25, step=5, format="%d",
-                                          help="Positive = tightening; added directly to i_t in decimal units.")
+        # Policy shock magnitude in basis points (absolute, sign chosen by option)
+        policy_shock_bp_abs = st.number_input(
+            "Policy shock size (absolute bp)",
+            value=25, step=5, format="%d",
+            help="Tightening applies +bp; easing applies -bp. Added directly to i_t (decimal) with AR(1) persistence."
+        )
         shock_quarter = st.slider("Shock timing (t)", min_value=1, max_value=T-1, value=1, step=1)
         shock_persist = st.slider("Shock persistence ρ_shock (applies to all shock types)", 0.0, 0.95, 0.0, 0.05)
 
@@ -292,10 +301,12 @@ def fit_models_original(df_est: pd.DataFrame, pi_star_quarterly: float) -> Dict[
         "pi_star_quarterly": float(pi_star_quarterly),
     }
 
-def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp, t0, rho):
+def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, rho):
     """
     Build AR(1) shock arrays for IS (DlogGDP, decimal), Phillips (DlogCPI, decimal),
-    and Taylor (policy rate, decimal). Policy shock is specified in basis points.
+    and Taylor (policy rate, decimal). Policy shock is specified in absolute basis points.
+    - Tightening: +bp
+    - Easing:     -bp
     """
     is_arr = np.zeros(T)
     pc_arr = np.zeros(T)
@@ -312,7 +323,12 @@ def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp, t0, rho)
             pc_arr[k] = rho * pc_arr[k - 1]
 
     elif target == "Taylor (Policy tightening)":
-        pol_arr[t0] = policy_bp / 10000.0  # bp -> decimal
+        pol_arr[t0] = (policy_bp_abs / 10000.0)  # +bp -> decimal
+        for k in range(t0 + 1, T):
+            pol_arr[k] = rho * pol_arr[k - 1]
+
+    elif target == "Taylor (Policy easing)":
+        pol_arr[t0] = -(policy_bp_abs / 10000.0)  # -bp -> decimal
         for k in range(t0 + 1, T):
             pol_arr[k] = rho * pol_arr[k - 1]
 
@@ -418,7 +434,7 @@ try:
 
         # Build shocks & simulate
         is_arr, pc_arr, pol_arr = build_shocks_original(
-            T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp, shock_quarter, shock_persist
+            T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
         )
         g0, p0, i0 = simulate_original(
             T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly
@@ -601,7 +617,7 @@ try:
 
         with st.expander("Simple NK equations (model form)"):
             st.latex(r"x_t = \rho_x x_{t-1} - \frac{1}{\sigma}\big(i_t - \pi_{t+1} - r^n_t \big)")
-            st.latex(r"\pi_t = \gamma_\pi \pi_{t-1} + \kappa x_t + u_t")
+            st.latex(r"\pi_t = \gamma_\pi \pi_{-1} + \kappa x_t + u_t")
             st.latex(r"i_t = \rho_i i_{t-1} + (1-\rho_i)\big(\phi_\pi \pi_t + \phi_x x_t\big) + \varepsilon^i_t")
             st.json({
                 "sigma": sigma, "kappa": kappa, "phi_pi": phi_pi, "phi_x": phi_x,
