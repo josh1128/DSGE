@@ -2,12 +2,13 @@
 # -----------------------------------------------------------
 # Streamlit app that runs:
 #   1) Original model (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate)
+#      - Taylor rule now uses an **inflation gap**: (π_t - π*), where π* is a target.
+#      - LaTeX equations (with fitted coefficients) are rendered below each chart.
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 #
 # Notes:
 # - GDP/Inflation shown in PERCENT (%); Nominal policy rate shown in DECIMAL (e.g., 0.03 = 3%).
-# - For Original model, LaTeX equations (with fitted coefficients) are rendered below each chart.
-# - Apply one AR(1)-type shock to IS or Phillips using sidebar controls.
+# - One AR(1)-type shock can be applied to IS or Phillips in the Original model.
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -27,8 +28,8 @@ st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 
 st.markdown(
     "- **Original**: GDP & CPI are plotted in **%** (Dlog × 100); **Nominal rate** in **decimal**.  \n"
-    "- **Simple NK (built-in)**: Output gap, inflation, and nominal rate are in **percentage points (pp)**.  \n"
-    "- Use the sidebar to pick a model, horizon, and shocks."
+    "- **Taylor (Original)** uses **inflation gap**: \\(\\pi_t - \\pi^{\\*}\\).  \n"
+    "- **Simple NK (built-in)**: Output gap, inflation, and nominal rate are in **percentage points (pp)**."
 )
 
 # =========================
@@ -44,13 +45,7 @@ def ensure_decimal_rate(series: pd.Series) -> pd.Series:
 def fmt_coef(x: float, nd: int = 3) -> str:
     """Format a coefficient with sign, for LaTeX concatenation."""
     s = f"{x:.{nd}f}"
-    if x >= 0:
-        return f"+{s}"
-    return s  # already has '-'
-
-def fmt_abs(x: float, nd: int = 3) -> str:
-    """Format absolute value (for leading constant)."""
-    return f"{abs(x):.{nd}f}"
+    return f"+{s}" if x >= 0 else s
 
 # =========================
 # Simple NK (built-in) model
@@ -97,13 +92,12 @@ class SimpleNK3EqBuiltIn:
             raise ValueError("shock must be 'demand', 'cost', or 'policy'.")
 
         for t in range(T):
-            # propagate AR(1) demand/cost shocks
             if t > t0:
                 if shock == "demand":
                     r_nat[t] += rho_sh * r_nat[t-1]
                 elif shock == "cost":
                     u[t] += rho_sh * u[t-1]
-            # lags
+
             x_lag = x[t-1] if t > 0 else 0.0
             pi_lag = pi[t-1] if t > 0 else 0.0
             i_lag = i[t-1] if t > 0 else 0.0
@@ -140,10 +134,20 @@ with st.sidebar:
     T = st.slider("Horizon (quarters)", min_value=8, max_value=60, value=20, step=1)
 
     if model_choice == "Original (DSGE.xlsx)":
-        # File uploads + rho for Taylor smoothing
         xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original")
         fallback = Path(__file__).parent / "DSGE.xlsx"
+
         rho_sim = st.slider("Policy smoothing ρ (Taylor, 0 = fast, 0.95 = slow)", 0.0, 0.95, 0.80, 0.05)
+
+        st.header("Inflation target for Taylor")
+        use_sample_mean = st.checkbox("Use sample mean of DlogCPI as target π*", value=False)
+        if use_sample_mean:
+            # placeholder, updated after data load
+            st.caption("Target will be set to the sample mean of DlogCPI (quarterly decimal) after data loads.")
+            target_annual_pct = None
+        else:
+            target_annual_pct = st.slider("π* (annual %, converted to quarterly)", 0.0, 5.0, 2.0, 0.1)
+        st.divider()
 
         st.header("Shock")
         shock_target = st.selectbox("Apply shock to", ["None", "IS (Demand)", "Phillips (Supply)"], index=0)
@@ -153,7 +157,6 @@ with st.sidebar:
         shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
 
     else:
-        # Simple NK (built-in) params
         st.header("Simple NK parameters (pp units)")
         sigma = st.slider("σ (IS sensitivity; larger 1/σ ⇒ stronger rate effect)", 0.2, 5.0, 1.00, 0.05)
         kappa = st.slider("κ (Phillips slope)", 0.01, 0.50, 0.10, 0.01)
@@ -209,7 +212,7 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
     # Convert nominal to DECIMAL if it's in percent levels
     df["Nominal Rate"] = ensure_decimal_rate(df["Nominal Rate"])
 
-    # Build lags/transforms (Dlog series are already DECIMAL)
+    # Build lags/transforms (Dlog series already DECIMAL)
     df["DlogGDP_L1"] = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"] = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"] = df["Nominal Rate"].shift(1)
@@ -235,8 +238,8 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
     return df, df_est
 
 
-@st.cache_data(show_spinner=True)
-def fit_models_original(df_est: pd.DataFrame) -> Dict[str, sm.regression.linear_model.RegressionResultsWrapper]:
+def fit_models_original(df_est: pd.DataFrame, pi_star_quarterly: float) -> Dict[str, sm.regression.linear_model.RegressionResultsWrapper]:
+    """Fit IS, Phillips, and Taylor with inflation gap (π_t - π*)."""
     # IS
     X_is = sm.add_constant(df_est[[
         "DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
@@ -251,15 +254,20 @@ def fit_models_original(df_est: pd.DataFrame) -> Dict[str, sm.regression.linear_
     y_pc = df_est["Dlog_CPI"]
     model_pc = sm.OLS(y_pc, X_pc).fit()
 
-    # Taylor (partial adjustment) — all in DECIMALS
-    X_tr = sm.add_constant(df_est[["Nominal_Rate_L1", "Dlog_CPI", "DlogGDP"]])
+    # Taylor (partial adjustment) — use inflation gap
+    infl_gap = df_est["Dlog_CPI"] - pi_star_quarterly
+    X_tr = sm.add_constant(pd.DataFrame({
+        "Nominal_Rate_L1": df_est["Nominal_Rate_L1"],
+        "Inflation_Gap": infl_gap,
+        "DlogGDP": df_est["DlogGDP"],
+    }))
     y_tr = df_est["Nominal Rate"]
     model_tr = sm.OLS(y_tr, X_tr).fit()
 
     # Convert to partial-adjustment parameters used in simulation
     b0 = float(model_tr.params["const"])
     rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)
-    bpi = float(model_tr.params["Dlog_CPI"])
+    bpi = float(model_tr.params["Inflation_Gap"])
     bg = float(model_tr.params["DlogGDP"])
 
     alpha_star = b0 / (1 - rhoh)
@@ -272,7 +280,9 @@ def fit_models_original(df_est: pd.DataFrame) -> Dict[str, sm.regression.linear_
         "model_tr": model_tr,
         "alpha_star": alpha_star,
         "phi_pi_star": phi_pi_star,
-        "phi_g_star": phi_g_star
+        "phi_g_star": phi_g_star,
+        "rho_hat": rhoh,
+        "pi_star_quarterly": float(pi_star_quarterly),
     }
 
 def build_shocks_original(T, target, is_size_pp, pc_size_pp, t0, rho):
@@ -297,9 +307,11 @@ def simulate_original(
     means: Dict[str, float],
     i_mean_dec: float,
     real_rate_mean_dec: float,
+    pi_star_quarterly: float,
     is_shock_arr=None,
     pc_shock_arr=None
 ):
+    """Simulate paths. Taylor uses inflation gap π_t - π*."""
     g = np.zeros(T)  # DlogGDP (decimal)
     p = np.zeros(T)  # DlogCPI (decimal)
     i = np.zeros(T)  # Nominal rate (decimal)
@@ -341,7 +353,8 @@ def simulate_original(
         }])
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
-        i_star = alpha_star + phi_pi_star * p[t] + phi_g_star * g[t]
+        pi_gap_t = p[t] - pi_star_quarterly  # <-- inflation gap
+        i_star = alpha_star + phi_pi_star * pi_gap_t + phi_g_star * g[t]
         i[t] = rho_sim * i[t - 1] + (1 - rho_sim) * i_star
 
     return g, p, i
@@ -351,10 +364,21 @@ def simulate_original(
 # =========================
 try:
     if model_choice == "Original (DSGE.xlsx)":
-        # Load & fit
+        # Load
         file_source = xlf if xlf is not None else (fallback if 'fallback' in locals() else None)
         df_all, df_est = load_and_prepare_original(file_source)
-        models_o = fit_models_original(df_est)
+
+        # Determine π* (quarterly decimal)
+        if 'use_sample_mean' in locals() and use_sample_mean:
+            pi_star_quarterly = float(df_est["Dlog_CPI"].mean())
+            st.info(f"π* set to sample mean of DlogCPI: {pi_star_quarterly:.4f} (quarterly decimal)")
+        else:
+            annual_pct = target_annual_pct if target_annual_pct is not None else 2.0
+            pi_star_quarterly = (annual_pct / 100.0) / 4.0
+            st.info(f"π* set to {annual_pct:.2f}% annual ⇒ {pi_star_quarterly:.4f} quarterly (decimal)")
+
+        # Fit models (Taylor uses inflation gap)
+        models_o = fit_models_original(df_est, pi_star_quarterly)
 
         # Anchors & means
         i_mean_dec = float(df_est["Nominal Rate"].mean())
@@ -371,12 +395,12 @@ try:
 
         # Shocks & simulate
         is_arr, pc_arr = build_shocks_original(T, shock_target, is_shock_size_pp, pc_shock_size_pp, shock_quarter, shock_persist)
-        g0, p0, i0 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec)
-        gS, pS, iS = simulate_original(T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, is_arr, pc_arr)
+        g0, p0, i0 = simulate_original(T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly)
+        gS, pS, iS = simulate_original(T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly, is_arr, pc_arr)
 
         # Plot IRFs
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
-        fig, axes = plt.subplots(3, 1, figsize=(12, 11), sharex=True)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         quarters = np.arange(T)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
@@ -412,7 +436,7 @@ try:
         st.pyplot(fig)
 
         # ===== LaTeX equations (fitted) =====
-        st.subheader("Estimated Equations (Original model)")
+        st.subheader("Estimated Equations (Original model, with inflation gap in Taylor)")
 
         # Pull fitted coefficients
         m_is = models_o["model_is"]
@@ -421,8 +445,9 @@ try:
         alpha_star = models_o["alpha_star"]
         phi_pi_star = models_o["phi_pi_star"]
         phi_g_star = models_o["phi_g_star"]
+        rho_hat = models_o["rho_hat"]
 
-        # IS equation: DlogGDP_t = c + a1*DlogGDP_{t-1} + a2*RealRate_{t-2} + a3*DlogFD_{t-1} + a4*DlogREER_t + a5*DlogEnergy_t + a6*DlogNonEnergy_t + ε_t
+        # IS
         c_is = float(m_is.params["const"])
         a1 = float(m_is.params["DlogGDP_L1"])
         a2 = float(m_is.params["Real_Rate_L2_data"])
@@ -431,7 +456,7 @@ try:
         a5 = float(m_is.params["Dlog_Energy"])
         a6 = float(m_is.params["Dlog_NonEnergy"])
 
-        st.markdown("**IS Curve (DlogGDP)**")
+        st.markdown("**IS Curve (\\(\\Delta \\log GDP_t\\))**")
         st.latex(
             r"""
             \begin{aligned}
@@ -447,7 +472,7 @@ try:
               .replace("{a6}", fmt_coef(a6))
         )
 
-        # Phillips: DlogCPI_t = c + b1*DlogCPI_{t-1} + b2*DlogGDP_{t-1} + b3*DlogREER_{t-2} + b4*DlogEnergy_{t-1} + b5*DlogNonEnergy_{t-1} + u_t
+        # Phillips
         c_pc = float(m_pc.params["const"])
         b1 = float(m_pc.params["Dlog_CPI_L1"])
         b2 = float(m_pc.params["DlogGDP_L1"])
@@ -455,7 +480,7 @@ try:
         b4 = float(m_pc.params["Dlog_Energy_L1"])
         b5 = float(m_pc.params["Dlog_Non_Energy_L1"])
 
-        st.markdown("**Phillips Curve (DlogCPI)**")
+        st.markdown("**Phillips Curve (\\(\\Delta \\log CPI_t\\))**")
         st.latex(
             r"""
             \begin{aligned}
@@ -470,29 +495,35 @@ try:
               .replace("{b5}", fmt_coef(b5))
         )
 
-        # Taylor (partial adjustment form implied by OLS):
-        # i_t = ρ i_{t-1} + (1-ρ) [ α* + φ_π* * π_t + φ_g* * g_t ]
-        rho_hat = float(m_tr.params["Nominal_Rate_L1"])
-        st.markdown("**Taylor Rule (partial adjustment)**")
+        # Taylor with inflation gap
+        st.markdown("**Taylor Rule (partial adjustment, with inflation gap)**")
         st.latex(
             r"""
-            i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\,\Big( \alpha^\* \;+\; \phi_{\pi}^\*\,\pi_t \;+\; \phi_{g}^\*\,g_t \Big)
+            i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\,\Big( \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{g}^\*\,g_t \Big)
             """
         )
         st.latex(
             r"""
-            \rho = {rho}\,,\quad \alpha^\* = {a}\,,\quad \phi_{\pi}^\* = {fp}\,,\quad \phi_{g}^\* = {fg}
+            \rho = {rho}\,,\quad \alpha^\* = {a}\,,\quad \phi_{\pi}^\* = {fp}\,,\quad \phi_{g}^\* = {fg}\,,\quad \pi^\* = {pistar}
             """.replace("{rho}", f"{rho_hat:.3f}")
               .replace("{a}", f"{alpha_star:.3f}")
               .replace("{fp}", f"{phi_pi_star:.3f}")
               .replace("{fg}", f"{phi_g_star:.3f}")
+              .replace("{pistar}", f"{pi_star_quarterly:.4f}")
         )
+
+        # Optional sanity note if phi_pi_star <= 0
+        if phi_pi_star <= 0:
+            st.warning(
+                "Estimated policy response to the inflation gap (φπ*) is ≤ 0. "
+                "Consider re-estimating with a different π* definition, sample window, or adding further controls."
+            )
 
         # Diagnostics
         with st.expander("Model diagnostics (OLS summaries)"):
             st.write("**IS Curve**"); st.text(models_o["model_is"].summary().as_text())
             st.write("**Phillips Curve**"); st.text(models_o["model_pc"].summary().as_text())
-            st.write("**Taylor Rule**"); st.text(models_o["model_tr"].summary().as_text())
+            st.write("**Taylor Rule (with inflation gap)**"); st.text(models_o["model_tr"].summary().as_text())
 
     else:
         # =========================
@@ -514,7 +545,7 @@ try:
 
         # Plot (all in pp)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
-        fig, axes = plt.subplots(3, 1, figsize=(12, 11), sharex=True)
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
         axes[0].plot(h, x0, label="Baseline", linewidth=2)
@@ -560,5 +591,6 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
