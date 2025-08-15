@@ -1,25 +1,16 @@
 # dsge_dashboard.py
 # -----------------------------------------------------------
-# A single Streamlit app with two sections:
-#   TAB 1) DSGE (IRFs):
-#       - Original (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate, decimal)
-#         * Taylor uses inflation gap (π_t − π*)
-#         * Shocks: IS, Phillips, and Taylor (tightening/easing)
-#         * Policy shock behavior selector:
-#             · Add after smoothing (default)
-#             · Add to target (inside 1−ρ)
-#             · Force local jump (override)
-#         * Equations and parameter→curve mapping shown
-#       - Simple NK (built-in): 3-eq NK with clearly grouped sliders by curve
-#
-#   TAB 2) Economic Indicators (Plotly):
-#       - Ported from Dash logic; HP filter, trend/cycle/raw render
-#       - Year range slider + Real GDP overlay
-#
-# Notes:
-# - No NK(Excel) model; only Original (Excel) + Simple NK (built-in).
-# - For Original model: GDP/CPI plotted in %, policy rate in DECIMAL.
-# - For Simple NK: x, π, i all in percentage points (pp).
+# Streamlit app that runs:
+#   1) Original model (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate)
+#      - Taylor uses inflation gap (π_t − π*)
+#      - Shocks: IS, Phillips, and Taylor (tightening/easing)
+#      - Policy shock behavior selector:
+#          • Add after smoothing (default)
+#          • Add to target (inside 1−ρ)
+#          • Force local jump (override)  ← Guarantees an uptick/downtick vs last period
+#      - LaTeX equations shown below charts
+#   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
+#      - NOW clearly shows which parameters affect which curve
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -27,24 +18,23 @@ from typing import Optional, Tuple, Dict
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from statsmodels.tsa.filters.hp_filter import hpfilter
 import streamlit as st
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
 from pathlib import Path
 
 # =========================
 # Page setup
 # =========================
-st.set_page_config(page_title="Macro Dashboard — DSGE & Indicators", layout="wide")
-st.title("Macro Dashboard — DSGE (IRFs) & Economic Indicators")
+st.set_page_config(page_title="DSGE IRF Dashboard", layout="wide")
+st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 
 st.markdown(
-    "Use the tabs below to switch between the **DSGE (IRFs)** tools and the **Economic Indicators** graphs."
+    "- **Original**: GDP & CPI in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
+    "- **Taylor** uses **inflation gap**: \\(\\pi_t - \\pi^*\\)."
 )
 
 # =========================
-# Shared helpers
+# Helpers
 # =========================
 def ensure_decimal_rate(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce")
@@ -103,7 +93,7 @@ class SimpleNK3EqBuiltIn:
             pi_lag = pi[t-1] if t>0 else 0.0
             i_lag = i[t-1] if t>0 else 0.0
 
-            # Solve contemporaneously for x_t given policy and Phillips
+            # Solve contemporaneously for x_t given policy rule and Phillips
             A_x = (1 - p.rho_i) * (p.phi_pi * p.kappa + p.phi_x) - p.kappa
             B_const = (
                 p.rho_i * i_lag
@@ -120,12 +110,131 @@ class SimpleNK3EqBuiltIn:
         return np.arange(T), x, pi, i
 
 # =========================
+# Sidebar
+# =========================
+with st.sidebar:
+    st.header("Model selection")
+    model_choice = st.selectbox("Choose model version", ["Original (DSGE.xlsx)", "Simple NK (built-in)"], index=0)
+
+    st.header("Simulation settings")
+    T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
+
+    if model_choice == "Original (DSGE.xlsx)":
+        xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original")
+        fallback = Path(__file__).parent / "DSGE.xlsx"
+
+        rho_sim = st.slider("Policy smoothing ρ (Taylor)", 0.0, 0.95, 0.80, 0.05)
+
+        st.header("Inflation target for Taylor")
+        use_sample_mean = st.checkbox("Use sample mean of DlogCPI as target π*", value=False)
+        if use_sample_mean:
+            target_annual_pct = None
+            st.caption("π* will be set to sample mean (quarterly) after data loads.")
+        else:
+            target_annual_pct = st.slider("π* (annual %)", 0.0, 5.0, 2.0, 0.1)
+        st.divider()
+
+        st.header("Shock")
+        shock_target = st.selectbox(
+            "Apply shock to",
+            ["None", "IS (Demand)", "Phillips (Supply)", "Taylor (Policy tightening)", "Taylor (Policy easing)"],
+            index=0
+        )
+        is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f")
+        pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f")
+        policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d")
+        shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1)
+        shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
+
+        st.header("Policy shock behavior")
+        policy_mode = st.radio(
+            "Choose how the policy shock is applied",
+            ["Add after smoothing (standard)", "Add to target (inside 1−ρ)", "Force local jump (override)"],
+            index=0,
+            help=("• Add after smoothing: i_t = ρ i_{t-1} + (1−ρ) i*_t + ε_t^{pol}  "
+                  "• Add to target: i_t = ρ i_{t-1} + (1−ρ)(i*_t + ε_t^{pol})  "
+                  "• Force local jump: ensures tightening raises i_t vs i_{t-1} by at least the shock size.")
+        )
+
+    else:
+        # ======= Parameter → Curve map (quick card) =======
+        st.info("**Which parameters affect which curve?**  \n"
+                "• **IS (Demand)**: σ, ρx, ρr  \n"
+                "• **Phillips (Supply)**: κ, γπ, ρu  \n"
+                "• **Taylor Rule (Policy)**: φπ, φx, ρi")
+
+        st.header("Simple NK parameters (pp units)")
+
+        # -------- IS (Demand) --------
+        st.subheader("IS Curve (Demand): controls how rates and shocks move activity (x_t)")
+        sigma = st.slider("σ — Demand sensitivity denominator",
+                          0.2, 5.0, 1.00, 0.05,
+                          help="Affects the **IS curve**. Lower σ ⇒ a given real rate change moves x_t more; "
+                               "higher σ ⇒ x_t reacts less.")
+        rho_x = st.slider("ρx — Output persistence",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="Affects the **IS curve** dynamics. Higher ρx ⇒ x_t is more persistent.")
+        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="Affects **IS shock path**. Higher ρr ⇒ demand shock fades more slowly.")
+        st.caption("**IS takeaway:** Lower σ or higher ρx/ρr → output gap moves more/longer after shocks.")
+
+        # -------- Phillips (Supply) --------
+        st.subheader("Phillips Curve (Supply): links activity to inflation (π_t)")
+        kappa = st.slider("κ — Phillips slope",
+                          0.01, 0.50, 0.10, 0.01,
+                          help="Affects the **Phillips curve**. Higher κ ⇒ x_t has a bigger impact on π_t.")
+        gamma_pi = st.slider("γπ — Inflation inertia",
+                             0.0, 0.95, 0.50, 0.05,
+                             help="Affects the **Phillips curve** persistence. Higher γπ ⇒ more carryover from π_{t-1}.")
+        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="Affects **Phillips shock path**. Higher ρu ⇒ cost-push shocks linger.")
+        st.caption("**Phillips takeaway:** Higher κ/γπ or higher ρu → inflation moves more and/or fades slower.")
+
+        # -------- Taylor Rule (Policy) --------
+        st.subheader("Taylor Rule (Policy): sets the interest rate (i_t)")
+        phi_pi = st.slider("φπ — Response to inflation",
+                           1.0, 3.0, 1.50, 0.05,
+                           help="Affects the **Taylor rule**. Larger φπ ⇒ stronger rate moves when inflation deviates from target.")
+        phi_x = st.slider("φx — Response to output gap",
+                          0.00, 1.00, 0.125, 0.005,
+                          help="Affects the **Taylor rule**. Larger φx ⇒ stronger response to x_t.")
+        rho_i = st.slider("ρi — Policy rate smoothing",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="Affects **policy persistence**. Higher ρi ⇒ rates adjust more gradually.")
+        st.caption("**Taylor takeaway:** Larger φπ/φx → stronger policy reaction; higher ρi → smoother, slower moves.")
+
+        # ---- Shock controls ----
+        st.divider()
+        st.header("Shock")
+        shock_type_nk = st.selectbox(
+            "Shock type (what we 'poke')",
+            ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
+            index=0,
+            help="Demand shock (r^n_t) ⇒ IS; Cost-push (u_t) ⇒ Phillips; Policy shock ⇒ Taylor."
+        )
+        shock_size_pp_nk = st.number_input(
+            "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
+            help="Size of the one-time shock at the chosen quarter, in pp (e.g., 1.00 = one percentage point)."
+        )
+        shock_quarter_nk = st.slider(
+            "Shock timing t (quarter index)", 1, T-1, 1, 1,
+            help="Quarter when the shock hits. Plot shows baseline vs. shocked paths."
+        )
+        shock_persist_nk = st.slider(
+            "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
+            help="AR(1) persistence for r^n_t or u_t. Policy shock is one-off (no AR)."
+        )
+
+# =========================
 # ORIGINAL MODEL (DSGE.xlsx)
 # =========================
 @st.cache_data(show_spinner=True)
 def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if file_like_or_path is None:
         raise FileNotFoundError("Upload DSGE.xlsx or place it beside this script.")
+
     if isinstance(file_like_or_path, (str, Path)):
         p = Path(file_like_or_path)
         if not p.is_absolute():
@@ -288,8 +397,10 @@ def simulate_original(
 
         if policy_mode.startswith("Add after"):
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
+
         elif policy_mode.startswith("Add to target"):
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + eps)
+
         else:  # Force local jump (override)
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
             if eps > 0:  # tightening
@@ -304,470 +415,232 @@ def simulate_original(
     return g, p, i
 
 # =========================
-# Economic Indicators helpers
+# Run selected model
 # =========================
-def apply_hp_filter(df: pd.DataFrame, column: str, prefix: Optional[str] = None,
-                    log_transform: bool = False, exp_transform: bool = False) -> pd.DataFrame:
-    if column not in df.columns:
-        return df
-    prefix = prefix or column
-    series = df[column].replace(0, np.nan).dropna()
-    if len(series) < 10:
-        return df
-    clean_series = np.log(series) if log_transform else series
-    cycle, trend = hpfilter(clean_series, lamb=1600)
-    if exp_transform:
-        trend = np.exp(trend)
-        cycle = clean_series - np.log(trend)  # not used, but keep consistent
-    df[f"{prefix}_Trend"] = trend.reindex(df.index)
-    df[f"{prefix}_Cycle"] = cycle.reindex(df.index)
-    return df
-
-def plot_indicator(df: pd.DataFrame, date_col: str, var: str, kind: str, title: str,
-                   overlay_series: Optional[pd.Series] = None, overlay_name: str = "Overlay"):
-    fig = go.Figure()
-    if kind == "trend":
-        fig.add_trace(go.Scatter(x=df[date_col], y=df.get(f"{var}_Trend"), mode="lines",
-                                 name=f"{var} - Trend", line=dict(dash="dot")))
-    elif kind == "cycle":
-        fig.add_trace(go.Scatter(x=df[date_col], y=df.get(f"{var}_Cycle"), mode="lines",
-                                 name=f"{var} - Cycle", line=dict(dash="dot")))
-    elif kind == "raw_trend":
-        fig.add_trace(go.Scatter(x=df[date_col], y=df.get(var), mode="lines",
-                                 name=f"{var} - Raw"))
-        fig.add_trace(go.Scatter(x=df[date_col], y=df.get(f"{var}_Trend"), mode="lines",
-                                 name=f"{var} - Trend", line=dict(dash="dot")))
-    else:  # raw
-        fig.add_trace(go.Scatter(x=df[date_col], y=df.get(var), mode="lines",
-                                 name=f"{var} - Raw"))
-    if overlay_series is not None:
-        fig.add_trace(go.Scatter(x=df[date_col], y=overlay_series, mode="lines",
-                                 name=overlay_name))
-    fig.update_layout(
-        title={'text': title, 'x': 0.5, 'xanchor': 'center'},
-        xaxis_title="Date", yaxis_title=var, legend_title="Series",
-        template="plotly_white", hovermode="x unified", margin=dict(l=40, r=40, t=60, b=40)
-    )
-    return fig
-
-# =========================
-# TABS
-# =========================
-tab1, tab2 = st.tabs(["🔵 DSGE (IRFs)", "🟢 Economic Indicators"])
-
-# ==========================================================
-# TAB 1 — DSGE (IRFs)
-# ==========================================================
-with tab1:
-    st.subheader("Section A — DSGE IRF Dashboard")
-
-    with st.sidebar:
-        st.markdown("### DSGE Controls")
-        model_choice = st.selectbox("Model", ["Original (DSGE.xlsx)", "Simple NK (built-in)"], index=0)
-        T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
-
+try:
     if model_choice == "Original (DSGE.xlsx)":
-        colL, colR = st.columns([1,2], gap="large")
-        with colL:
-            xlf = st.file_uploader("Upload DSGE.xlsx (or place beside script)", type=["xlsx"])
-            rho_sim = st.slider("Policy smoothing ρ (Taylor)", 0.0, 0.95, 0.80, 0.05)
+        file_source = xlf if xlf is not None else (fallback if 'fallback' in locals() else None)
+        df_all, df_est = load_and_prepare_original(file_source)
 
-            st.markdown("**Inflation target (π\*) for Taylor**")
-            use_sample_mean = st.checkbox("Use sample mean of DlogCPI as π*", value=False)
-            if use_sample_mean:
-                target_annual_pct = None
-                st.caption("π* will be set to sample mean (quarterly) after data loads.")
-            else:
-                target_annual_pct = st.slider("π* (annual %)", 0.0, 5.0, 2.0, 0.1)
-            st.divider()
+        # Determine π* (quarterly decimal)
+        if 'use_sample_mean' in locals() and use_sample_mean:
+            pi_star_quarterly = float(df_est["Dlog_CPI"].mean())
+            st.info(f"π* set to sample mean of DlogCPI: {pi_star_quarterly:.4f} (quarterly decimal)")
+        else:
+            annual_pct = target_annual_pct if target_annual_pct is not None else 2.0
+            pi_star_quarterly = (annual_pct / 100.0) / 4.0
+            st.info(f"π* set to {annual_pct:.2f}% annual ⇒ {pi_star_quarterly:.4f} quarterly (decimal)")
 
-            st.markdown("**Shocks**")
-            shock_target = st.selectbox(
-                "Apply shock to",
-                ["None", "IS (Demand)", "Phillips (Supply)", "Taylor (Policy tightening)", "Taylor (Policy easing)"],
-                index=0
-            )
-            is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f")
-            pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f")
-            policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d")
-            shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1)
-            shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
+        models_o = fit_models_original(df_est, pi_star_quarterly)
 
-            st.markdown("**Policy shock behavior**")
-            policy_mode = st.radio(
-                "How to apply the policy shock",
-                ["Add after smoothing (standard)", "Add to target (inside 1−ρ)", "Force local jump (override)"],
-                index=0
-            )
+        # Anchors & means
+        i_mean_dec = float(df_est["Nominal Rate"].mean())
+        real_rate_mean_dec = float(df_est["Real_Rate_L2_data"].mean())
+        means_o = {
+            "Dlog FD_Lag1": float(df_est["Dlog FD_Lag1"].mean()),
+            "Dlog_REER": float(df_est["Dlog_REER"].mean()),
+            "Dlog_Energy": float(df_est["Dlog_Energy"].mean()),
+            "Dlog_NonEnergy": float(df_est["Dlog_NonEnergy"].mean()),
+            "Dlog_Reer_L2": float(df_est["Dlog_Reer_L2"].mean()),
+            "Dlog_Energy_L1": float(df_est["Dlog_Energy_L1"].mean()),
+            "Dlog_Non_Energy_L1": float(df_est["Dlog_Non_Energy_L1"].mean()),
+        }
 
-        with colR:
-            try:
-                file_source = xlf if xlf is not None else None
-                df_all, df_est = load_and_prepare_original(file_source)
+        # Build shocks & simulate
+        is_arr, pc_arr, pol_arr = build_shocks_original(
+            T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
+        )
+        g0, p0, i0 = simulate_original(
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            policy_mode=policy_mode
+        )
+        gS, pS, iS = simulate_original(
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode
+        )
 
-                # π* (quarterly)
-                if use_sample_mean:
-                    pi_star_quarterly = float(df_est["Dlog_CPI"].mean())
-                    st.info(f"π* = sample mean of DlogCPI ⇒ {pi_star_quarterly:.4f} (quarterly decimal)")
-                else:
-                    annual_pct = target_annual_pct if target_annual_pct is not None else 2.0
-                    pi_star_quarterly = (annual_pct / 100.0) / 4.0
-                    st.info(f"π* = {annual_pct:.2f}% annual ⇒ {pi_star_quarterly:.4f} quarterly (decimal)")
+        # Plot IRFs
+        plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+        quarters = np.arange(T)
+        vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
-                models_o = fit_models_original(df_est, pi_star_quarterly)
+        axes[0].plot(quarters, g0*100, label="Baseline", linewidth=2)
+        axes[0].plot(quarters, gS*100, label="Shock", linewidth=2)
+        axes[0].axvline(shock_quarter, **vline_kwargs)
+        axes[0].set_title("Real GDP Growth (DlogGDP, %)")
+        axes[0].set_ylabel("%")
+        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
 
-                # Anchors & means
-                i_mean_dec = float(df_est["Nominal Rate"].mean())
-                real_rate_mean_dec = float(df_est["Real_Rate_L2_data"].mean())
-                means_o = {
-                    "Dlog FD_Lag1": float(df_est["Dlog FD_Lag1"].mean()),
-                    "Dlog_REER": float(df_est["Dlog_REER"].mean()),
-                    "Dlog_Energy": float(df_est["Dlog_Energy"].mean()),
-                    "Dlog_NonEnergy": float(df_est["Dlog_NonEnergy"].mean()),
-                    "Dlog_Reer_L2": float(df_est["Dlog_Reer_L2"].mean()),
-                    "Dlog_Energy_L1": float(df_est["Dlog_Energy_L1"].mean()),
-                    "Dlog_Non_Energy_L1": float(df_est["Dlog_Non_Energy_L1"].mean()),
-                }
+        axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
+        axes[1].plot(quarters, pS*100, label="Shock", linewidth=2)
+        axes[1].axvline(shock_quarter, **vline_kwargs)
+        axes[1].set_title("Inflation (DlogCPI, %)")
+        axes[1].set_ylabel("%")
+        axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-                # Shocks & simulate
-                is_arr, pc_arr, pol_arr = build_shocks_original(
-                    T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
-                )
-                g0, p0, i0 = simulate_original(
-                    T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
-                    policy_mode=policy_mode
-                )
-                gS, pS, iS = simulate_original(
-                    T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
-                    is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode
-                )
+        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, iS, label="Shock", linewidth=2)
+        axes[2].axvline(shock_quarter, **vline_kwargs)
+        axes[2].set_title("Nominal Policy Rate (decimal)")
+        axes[2].set_xlabel("Quarters ahead")
+        axes[2].set_ylabel("decimal")
+        axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
-                # Plot IRFs
-                plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
-                fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
-                quarters = np.arange(T)
-                vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
+        plt.tight_layout(); st.pyplot(fig)
 
-                axes[0].plot(quarters, g0*100, label="Baseline", linewidth=2)
-                axes[0].plot(quarters, gS*100, label="Shock", linewidth=2)
-                axes[0].axvline(shock_quarter, **vline_kwargs)
-                axes[0].set_title("Real GDP Growth (DlogGDP, %)"); axes[0].set_ylabel("%")
-                axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
+        # Readout at the shock quarter
+        if shock_target.startswith("Taylor"):
+            delta_i_bp = (iS - i0)[shock_quarter] * 10000.0
+            st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp  |  mode: {policy_mode}  |  ρ={rho_sim:.2f}")
 
-                axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
-                axes[1].plot(quarters, pS*100, label="Shock", linewidth=2)
-                axes[1].axvline(shock_quarter, **vline_kwargs)
-                axes[1].set_title("Inflation (DlogCPI, %)"); axes[1].set_ylabel("%")
-                axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
+        # ===== LaTeX equations =====
+        st.subheader("Estimated Equations (Original model)")
+        m_is = models_o["model_is"]; m_pc = models_o["model_pc"]; m_tr = models_o["model_tr"]
+        alpha_star = models_o["alpha_star"]; phi_pi_star = models_o["phi_pi_star"]; phi_g_star = models_o["phi_g_star"]
+        rho_hat = models_o["rho_hat"]
 
-                axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
-                axes[2].plot(quarters, iS, label="Shock", linewidth=2)
-                axes[2].axvline(shock_quarter, **vline_kwargs)
-                axes[2].set_title("Nominal Policy Rate (decimal)"); axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("decimal")
-                axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
+        # IS
+        c_is = float(m_is.params["const"])
+        a1 = float(m_is.params["DlogGDP_L1"])
+        a2 = float(m_is.params["Real_Rate_L2_data"])
+        a3 = float(m_is.params["Dlog FD_Lag1"])
+        a4 = float(m_is.params["Dlog_REER"])
+        a5 = float(m_is.params["Dlog_Energy"])
+        a6 = float(m_is.params["Dlog_NonEnergy"])
+        st.markdown("**IS Curve (\\(\\Delta \\log GDP_t\\))**")
+        st.latex(
+            r"""
+            \begin{aligned}
+            \Delta \log GDP_t &= {c} \; {a1}\,\Delta \log GDP_{t-1} \; {a2}\,RR_{t-2} \; {a3}\,\Delta \log FD_{t-1} \\
+                              &\quad {a4}\,\Delta \log REER_t \; {a5}\,\Delta \log Energy_t \; {a6}\,\Delta \log NonEnergy_t \; + \varepsilon_t
+            \end{aligned}
+            """.replace("{c}", f"{c_is:.3f}")
+             .replace("{a1}", fmt_coef(a1)).replace("{a2}", fmt_coef(a2))
+             .replace("{a3}", fmt_coef(a3)).replace("{a4}", fmt_coef(a4))
+             .replace("{a5}", fmt_coef(a5)).replace("{a6}", fmt_coef(a6))
+        )
 
-                plt.tight_layout(); st.pyplot(fig)
+        # Phillips
+        c_pc = float(m_pc.params["const"])
+        b1 = float(m_pc.params["Dlog_CPI_L1"])
+        b2 = float(m_pc.params["DlogGDP_L1"])
+        b3 = float(m_pc.params["Dlog_Reer_L2"])
+        b4 = float(m_pc.params["Dlog_Energy_L1"])
+        b5 = float(m_pc.params["Dlog_Non_Energy_L1"])
+        st.markdown("**Phillips Curve (\\(\\Delta \\log CPI_t\\))**")
+        st.latex(
+            r"""
+            \begin{aligned}
+            \Delta \log CPI_t &= {c} \; {b1}\,\Delta \log CPI_{t-1} \; {b2}\,\Delta \log GDP_{t-1} \; {b3}\,\Delta \log REER_{t-2} \\
+                               &\quad {b4}\,\Delta \log Energy_{t-1} \; {b5}\,\Delta \log NonEnergy_{t-1} \; + u_t
+            \end{aligned}
+            """.replace("{c}", f"{c_pc:.3f}")
+             .replace("{b1}", fmt_coef(b1)).replace("{b2}", fmt_coef(b2))
+             .replace("{b3}", fmt_coef(b3)).replace("{b4}", fmt_coef(b4))
+             .replace("{b5}", fmt_coef(b5))
+        )
 
-                # Equations
-                st.markdown("#### Estimated Equations (Original model)")
-                m_is = models_o["model_is"]; m_pc = models_o["model_pc"]; m_tr = models_o["model_tr"]
-                alpha_star = models_o["alpha_star"]; phi_pi_star = models_o["phi_pi_star"]; phi_g_star = models_o["phi_g_star"]
-                rho_hat = models_o["rho_hat"]
+        # Taylor (display matches chosen mode)
+        st.markdown("**Taylor Rule (partial adjustment, with inflation gap)**")
+        if policy_mode.startswith("Add after"):
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t")
+        elif policy_mode.startswith("Add to target"):
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\,\big(i_t^\* + \varepsilon^{\text{pol}}_t\big)")
+        else:
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t \quad (\text{with local-jump override})")
+        st.latex(r"i_t^\* \;=\; \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{g}^\*\,g_t")
+        st.latex(
+            r"""
+            \rho = {rho}\,,\quad \alpha^\* = {a}\,,\quad \phi_{\pi}^\* = {fp}\,,\quad \phi_{g}^\* = {fg}\,,\quad \pi^\* = {pistar}
+            """.replace("{rho}", f"{rho_hat:.3f}")
+             .replace("{a}", f"{alpha_star:.3f}")
+             .replace("{fp}", f"{phi_pi_star:.3f}")
+             .replace("{fg}", f"{phi_g_star:.3f}")
+             .replace("{pistar}", f"{pi_star_quarterly:.4f}")
+        )
 
-                c_is = float(m_is.params["const"])
-                a1 = float(m_is.params["DlogGDP_L1"]); a2 = float(m_is.params["Real_Rate_L2_data"])
-                a3 = float(m_is.params["Dlog FD_Lag1"]); a4 = float(m_is.params["Dlog_REER"])
-                a5 = float(m_is.params["Dlog_Energy"]); a6 = float(m_is.params["Dlog_NonEnergy"])
-                st.markdown("**IS Curve (\\(\\Delta \\log GDP_t\\))**")
-                st.latex(
-                    r"""
-                    \begin{aligned}
-                    \Delta \log GDP_t &= {c} \; {a1}\,\Delta \log GDP_{t-1} \; {a2}\,RR_{t-2} \; {a3}\,\Delta \log FD_{t-1} \\
-                                      &\quad {a4}\,\Delta \log REER_t \; {a5}\,\Delta \log Energy_t \; {a6}\,\Delta \log NonEnergy_t \; + \varepsilon_t
-                    \end{aligned}
-                    """.replace("{c}", f"{c_is:.3f}")
-                     .replace("{a1}", fmt_coef(a1)).replace("{a2}", fmt_coef(a2))
-                     .replace("{a3}", fmt_coef(a3)).replace("{a4}", fmt_coef(a4))
-                     .replace("{a5}", fmt_coef(a5)).replace("{a6}", fmt_coef(a6))
-                )
-
-                c_pc = float(m_pc.params["const"])
-                b1 = float(m_pc.params["Dlog_CPI_L1"]); b2 = float(m_pc.params["DlogGDP_L1"])
-                b3 = float(m_pc.params["Dlog_Reer_L2"]); b4 = float(m_pc.params["Dlog_Energy_L1"]); b5 = float(m_pc.params["Dlog_Non_Energy_L1"])
-                st.markdown("**Phillips Curve (\\(\\Delta \\log CPI_t\\))**")
-                st.latex(
-                    r"""
-                    \begin{aligned}
-                    \Delta \log CPI_t &= {c} \; {b1}\,\Delta \log CPI_{t-1} \; {b2}\,\Delta \log GDP_{t-1} \; {b3}\,\Delta \log REER_{t-2} \\
-                                       &\quad {b4}\,\Delta \log Energy_{t-1} \; {b5}\,\Delta \log NonEnergy_{t-1} \; + u_t
-                    \end{aligned}
-                    """.replace("{c}", f"{c_pc:.3f}")
-                     .replace("{b1}", fmt_coef(b1)).replace("{b2}", fmt_coef(b2))
-                     .replace("{b3}", fmt_coef(b3)).replace("{b4}", fmt_coef(b4))
-                     .replace("{b5}", fmt_coef(b5))
-                )
-
-                st.markdown("**Taylor Rule (partial adjustment, with inflation gap)**")
-                st.latex(r"i_t^\* \;=\; \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{g}^\*\,g_t")
-                st.latex(
-                    r"""
-                    \rho = {rho}\,,\quad \alpha^\* = {a}\,,\quad \phi_{\pi}^\* = {fp}\,,\quad \phi_{g}^\* = {fg}\,,\quad \pi^\* = {pistar}
-                    """.replace("{rho}", f"{rho_hat:.3f}")
-                     .replace("{a}", f"{alpha_star:.3f}")
-                     .replace("{fp}", f"{phi_pi_star:.3f}")
-                     .replace("{fg}", f"{phi_g_star:.3f}")
-                     .replace("{pistar}", f"{pi_star_quarterly:.4f}")
-                )
-
-            except Exception as e:
-                st.error(f"Problem loading/running the Original model: {e}")
+        with st.expander("Model diagnostics (OLS summaries)"):
+            st.write("**IS Curve**"); st.text(m_is.summary().as_text())
+            st.write("**Phillips Curve**"); st.text(m_pc.summary().as_text())
+            st.write("**Taylor Rule**"); st.text(m_tr.summary().as_text())
 
     else:
+        # =========================
         # Simple NK (built-in)
-        st.info("**Which parameters affect which curve?**  \n"
-                "• **IS (Demand)**: σ, ρx, ρr  \n"
-                "• **Phillips (Supply)**: κ, γπ, ρu  \n"
-                "• **Taylor Rule (Policy)**: φπ, φx, ρi")
+        # =========================
+        P = NKParamsSimple(sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
+                           rho_i=rho_i, rho_x=rho_x, rho_r=rho_r, rho_u=rho_u, gamma_pi=gamma_pi)
+        model = SimpleNK3EqBuiltIn(P)
+        label_to_code = {"Demand (IS)": "demand", "Cost-push (Phillips)": "cost", "Policy (Taylor)": "policy"}
+        code = label_to_code[shock_type_nk]
+        t0 = max(0, min(T-1, shock_quarter_nk - 1))
 
-        colA, colB = st.columns([1,2], gap="large")
-        with colA:
-            st.markdown("#### IS Curve (Demand)")
-            sigma = st.slider("σ — Demand sensitivity denominator", 0.2, 5.0, 1.00, 0.05)
-            rho_x = st.slider("ρx — Output persistence", 0.0, 0.98, 0.50, 0.02)
-            rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)", 0.0, 0.98, 0.80, 0.02)
-            st.caption("Lower σ or higher ρx/ρr → output gap moves more/longer after shocks.")
+        # Model key displayed on the page
+        st.info("**Model key (Simple NK):**  "
+                r"$x_t$ = output gap (pp),  "
+                r"$\pi_t$ = inflation (pp),  "
+                r"$i_t$ = nominal policy rate (pp).  "
+                r"$r_t^n$ = demand/natural-rate shock (pp),  "
+                r"$u_t$ = cost-push shock (pp).")
 
-            st.markdown("#### Phillips Curve (Supply)")
-            kappa = st.slider("κ — Phillips slope", 0.01, 0.50, 0.10, 0.01)
-            gamma_pi = st.slider("γπ — Inflation inertia", 0.0, 0.95, 0.50, 0.05)
-            rho_u = st.slider("ρu — Cost-push shock persistence (u_t)", 0.0, 0.98, 0.50, 0.02)
-            st.caption("Higher κ/γπ or higher ρu → inflation moves more and/or fades slower.")
+        # Baseline (size 0) vs Shock
+        h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, shock_persist_nk)
+        h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, shock_persist_nk)
 
-            st.markdown("#### Taylor Rule (Policy)")
-            phi_pi = st.slider("φπ — Response to inflation", 1.0, 3.0, 1.50, 0.05)
-            phi_x = st.slider("φx — Response to output gap", 0.00, 1.00, 0.125, 0.005)
-            rho_i = st.slider("ρi — Policy rate smoothing", 0.0, 0.98, 0.80, 0.02)
-            st.caption("Larger φπ/φx → stronger policy reaction; higher ρi → smoother, slower moves.")
+        # Plot IRFs (all in pp)
+        plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+        vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
-            st.divider()
-            st.markdown("#### Shock")
-            shock_type_nk = st.selectbox("Shock type", ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"], index=0)
-            shock_size_pp_nk = st.number_input("Shock size (pp)", value=1.00, step=0.25, format="%.2f")
-            shock_quarter_nk = st.slider("Shock timing (t)", 1, T-1, 1, 1)
-            shock_persist_nk = st.slider("Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02)
+        axes[0].plot(h, x0, linewidth=2, label="Baseline")
+        axes[0].plot(h, xS, linewidth=2, label="Shock")
+        axes[0].axvline(t0, **vline_kwargs); axes[0].set_title("Output Gap (x_t, pp)"); axes[0].set_ylabel("pp")
+        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
 
-        with colB:
-            P = NKParamsSimple(sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
-                               rho_i=rho_i, rho_x=rho_x, rho_r=rho_r, rho_u=rho_u, gamma_pi=gamma_pi)
-            model = SimpleNK3EqBuiltIn(P)
-            label_to_code = {"Demand (IS)": "demand", "Cost-push (Phillips)": "cost", "Policy (Taylor)": "policy"}
-            code = label_to_code[shock_type_nk]
-            t0 = max(0, min(T-1, shock_quarter_nk - 1))
+        axes[1].plot(h, pi0, linewidth=2, label="Baseline")
+        axes[1].plot(h, piS, linewidth=2, label="Shock")
+        axes[1].axvline(t0, **vline_kwargs); axes[1].set_title("Inflation (π_t, pp)"); axes[1].set_ylabel("pp")
+        axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-            st.caption(r"Model key: $x_t$=output gap (pp), $\pi_t$=inflation (pp), $i_t$=policy rate (pp), "
-                       r"$r_t^n$=demand shock, $u_t$=cost-push shock.")
+        axes[2].plot(h, i0, linewidth=2, label="Baseline")
+        axes[2].plot(h, iS, linewidth=2, label="Shock")
+        axes[2].axvline(t0, **vline_kwargs); axes[2].set_title("Nominal Policy Rate (i_t, pp)")
+        axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("pp")
+        axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
-            h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, shock_persist_nk)
-            h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, shock_persist_nk)
+        plt.tight_layout(); st.pyplot(fig)
 
-            plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
-            fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
-            vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
+        with st.expander("Simple NK equations"):
+            st.latex(r"x_t = \rho_x x_{t-1} \;-\; \frac{1}{\sigma}\big( i_t - \pi_{t+1} - r^n_t \big)")
+            st.latex(r"\pi_t = \gamma_\pi \pi_{t-1} \;+\; \kappa x_t \;+\; u_t")
+            st.latex(r"i_t = \rho_i i_{t-1} \;+\; (1-\rho_i)(\phi_\pi \pi_t + \phi_x x_t) \;+\; \varepsilon^i_t")
 
-            axes[0].plot(h, x0, linewidth=2, label="Baseline")
-            axes[0].plot(h, xS, linewidth=2, label="Shock")
-            axes[0].axvline(t0, **vline_kwargs); axes[0].set_title("Output Gap (x_t, pp)"); axes[0].set_ylabel("pp")
-            axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
-
-            axes[1].plot(h, pi0, linewidth=2, label="Baseline")
-            axes[1].plot(h, piS, linewidth=2, label="Shock")
-            axes[1].axvline(t0, **vline_kwargs); axes[1].set_title("Inflation (π_t, pp)"); axes[1].set_ylabel("pp")
-            axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
-
-            axes[2].plot(h, i0, linewidth=2, label="Baseline")
-            axes[2].plot(h, iS, linewidth=2, label="Shock")
-            axes[2].axvline(t0, **vline_kwargs); axes[2].set_title("Nominal Policy Rate (i_t, pp)")
-            axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("pp")
-            axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
-
-            plt.tight_layout(); st.pyplot(fig)
-
-# ==========================================================
-# TAB 2 — Economic Indicators (Plotly)
-# ==========================================================
-with tab2:
-    st.subheader("Section B — Economic Indicator Graphs")
-
-    # --- File controls ---
-    with st.expander("Data source", expanded=True):
-        st.caption("Select the Excel file and (optionally) adjust sheet names to match your workbook.")
-        file_up = st.file_uploader("Upload Excel file (.xlsx)", type=["xlsx"])
-        c1, c2, c3, c4, c5 = st.columns(5)
-        with c1: sheet_main = st.text_input("Potential Output sheet", "Potential Output")
-        with c2: sheet_hours = st.text_input("Hours sheet", "Hours")
-        with c3: sheet_is_curve = st.text_input("IS Curve sheet", "IS Curve")
-        with c4: sheet_phillips = st.text_input("Phillips sheet", "Phillips Curve")
-        with c5: sheet_taylor = st.text_input("Taylor sheet", "Taylor Rule")
-
-    if file_up is None:
-        st.warning("Upload an Excel file to render the indicator graphs.")
-        st.stop()
-
-    # --- Load workbook & sheets ---
-    try:
-        xls = pd.ExcelFile(file_up)
-        available = set(xls.sheet_names)
-        need = {sheet_main, sheet_hours, sheet_is_curve, sheet_phillips, sheet_taylor}
-        missing = [s for s in need if s not in available]
-        if missing:
-            st.error(f"Missing sheets: {missing}. Available: {xls.sheet_names}")
-            st.stop()
-    except Exception as e:
-        st.error(f"Could not read Excel file: {e}")
-        st.stop()
-
-    # --- Load Potential Output Data (+ Hours) ---
-    try:
-        data = pd.read_excel(xls, sheet_name=sheet_main, na_values=["NA"])
-        cols = ['Date', 'Population', 'Labour Force Participation', 'Labour Productivity', 'NAIRU',
-                'Output_Gap_multivariate', 'Output_Gap_Integrated', 'Output_Gap_Internal', 'Real GDP Expenditure']
-        for c in cols[1:]:
-            if c in data.columns:
-                data[c] = pd.to_numeric(data[c], errors='coerce')
-        data['Date'] = pd.to_datetime(data['Date'], errors='coerce')
-        data = data.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
-        data['Year'] = data['Date'].dt.year
-
-        hours_df = pd.read_excel(xls, sheet_name=sheet_hours, na_values=["NA"])
-        hours_df['Date'] = pd.to_datetime(hours_df['Date'], errors='coerce')
-        hours_df = hours_df.dropna(subset=['Date'])
-        if 'Average Hours Worked' in hours_df.columns:
-            hours_df['Average Hours Worked'] = pd.to_numeric(hours_df['Average Hours Worked'], errors='coerce')
-
-        # Merge hours backward
-        data = pd.merge_asof(data.sort_values('Date'), hours_df.sort_values('Date'), on='Date', direction='backward')
-
-        # Construct productivity properly
-        data['LFP_decimal'] = data['Labour Force Participation'] / 100
-        data['NAIRU_decimal'] = data['NAIRU'] / 100
-        data['Total Hours Worked'] = (
-            data['Population'] *
-            data['LFP_decimal'] *
-            (1 - data['NAIRU_decimal']) *
-            data['Average Hours Worked']
-        )
-        data['Labour Productivity'] = data['Real GDP Expenditure'] / data['Total Hours Worked']
-
-        # HP filters on inputs (only if column exists)
-        for col in ['Labour Force Participation', 'Labour Productivity', 'Average Hours Worked', 'Unemployment']:
-            if col in data.columns:
-                apply_hp_filter(data, col)
-
-        # Potential output (rescale to match base year level)
-        base_year = st.number_input("Base year for scaling potential output", min_value=1970, max_value=2100, value=2017, step=1)
-        if base_year in data['Year'].values:
-            base_idx = data.index[data['Year'] == base_year][0]
-            raw_potential_base = (
-                data.loc[base_idx, 'Population'] *
-                (data.loc[base_idx, 'Labour Force Participation_Trend'] / 100 if 'Labour Force Participation_Trend' in data else data.loc[base_idx, 'LFP_decimal']) *
-                (1 - data.loc[base_idx, 'NAIRU_decimal']) *
-                (data.loc[base_idx, 'Average Hours Worked_Trend'] if 'Average Hours Worked_Trend' in data else data.loc[base_idx, 'Average Hours Worked']) *
-                (data.loc[base_idx, 'Labour Productivity_Trend'] if 'Labour Productivity_Trend' in data else data.loc[base_idx, 'Labour Productivity'])
+        with st.expander("Symbol glossary (Simple NK)"):
+            st.markdown(
+                r"""
+- **$x_t$** — Output gap (percentage points, pp), activity above/below normal.  
+- **$\pi_t$** — Inflation (pp).  
+- **$i_t$** — Nominal policy rate (pp).  
+- **$r_t^n$** — Demand / natural-rate shock (pp), AR(1) with $\rho_r$.  
+- **$u_t$** — Cost-push shock (pp), AR(1) with $\rho_u$.  
+- **$\sigma$** — IS curve: lower ⇒ rates move $x_t$ more; higher ⇒ $x_t$ reacts less.  
+- **$\rho_x$** — IS curve: persistence of $x_t$.  
+- **$\rho_r$** — IS shock persistence.  
+- **$\kappa$** — Phillips curve: strength of $x_t \to \pi_t$.  
+- **$\gamma_\pi$** — Phillips curve: inflation inertia.  
+- **$\rho_u$** — Phillips shock persistence.  
+- **$\phi_\pi$** — Taylor rule: reaction to inflation.  
+- **$\phi_x$** — Taylor rule: reaction to output gap.  
+- **$\rho_i$** — Taylor rule: interest-rate smoothing.  
+- **Shock size (pp)** — One-off change at time $t_0$ (e.g., +1.00 pp).
+                """
             )
-            real_gdp_base = data.loc[base_idx, 'Real GDP Expenditure']
-            scaling_factor = real_gdp_base / raw_potential_base if raw_potential_base not in (0, np.nan) else 1.0
-        else:
-            st.warning("Base year not in the data; using scaling factor = 1.")
-            scaling_factor = 1.0
 
-        data['Potential Output'] = (
-            data['Population'] *
-            (data['Labour Force Participation_Trend'] / 100 if 'Labour Force Participation_Trend' in data else data['LFP_decimal']) *
-            (1 - data['NAIRU_decimal']) *
-            (data['Average Hours Worked_Trend'] if 'Average Hours Worked_Trend' in data else data['Average Hours Worked']) *
-            (data['Labour Productivity_Trend'] if 'Labour Productivity_Trend' in data else data['Labour Productivity']) *
-            scaling_factor
-        )
+except Exception as e:
+    st.error(f"Problem loading or running the selected model: {e}")
+    st.stop()
 
-        apply_hp_filter(data, 'Potential Output', log_transform=True, exp_transform=True)
-        data['Potential Output Growth (%)'] = data['Potential Output_Trend'].pct_change() * 100
-        data['Output Gap (%)'] = ((data['Real GDP Expenditure'] - data['Potential Output']) / data['Potential Output']) * 100
 
-    except Exception as e:
-        st.error(f"Problem constructing potential output: {e}")
-        st.stop()
-
-    # --- Load IS / Phillips / Taylor sheets (+ HP) ---
-    def load_sheet(name: str) -> pd.DataFrame:
-        df = pd.read_excel(xls, sheet_name=name, na_values=["NA"])
-        df.columns = df.columns.str.strip()
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
-        df['Year'] = df['Date'].dt.year
-        for col in df.columns:
-            if col not in ['Date', 'Year']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        return df
-
-    try:
-        is_curve_df = load_sheet(sheet_is_curve)
-        phillips_df = load_sheet(sheet_phillips)
-        taylor_df = load_sheet(sheet_taylor)
-    except Exception as e:
-        st.error(f"Problem loading secondary sheets: {e}")
-        st.stop()
-
-    # HP filters across selected columns
-    is_curve_cols = [c for c in is_curve_df.columns if c not in ['Date', 'Year']]
-    phillips_cols = [c for c in phillips_df.columns if c not in ['Date', 'Year']]
-    taylor_cols = [c for c in taylor_df.columns if c not in ['Date', 'Year']]
-    for col in is_curve_cols: apply_hp_filter(is_curve_df, col)
-    for col in phillips_cols: apply_hp_filter(phillips_df, col)
-    for col in taylor_cols: apply_hp_filter(taylor_df, col)
-
-    # Year slider bounds
-    year_min = int(min(data['Year'].min(), is_curve_df['Year'].min(), phillips_df['Year'].min(), taylor_df['Year'].min()))
-    year_max = int(max(data['Year'].max(), is_curve_df['Year'].max(), phillips_df['Year'].max(), taylor_df['Year'].max()))
-
-    # ---- Controls (left) & Plot (right)
-    cL, cR = st.columns([1,2], gap="large")
-    with cL:
-        st.markdown("#### Select series to plot")
-        # General variable list (exclude derived trend/cycle to avoid duplication)
-        general_candidates = [c for c in data.columns if c not in ['Date', 'Year'] and not c.endswith('_Trend') and not c.endswith('_Cycle')]
-        general = st.selectbox("General Variable (Potential/Gap/etc.)", options=sorted(general_candidates), index=general_candidates.index('Potential Output') if 'Potential Output' in general_candidates else 0)
-        show_gdp = st.checkbox("Overlay Real GDP when plotting Potential Output", value=True)
-
-        st.markdown("**Or pick a variable from a specific sheet** (overrides General):")
-        pick_is = st.selectbox("IS Curve variable", options=["(none)"] + is_curve_cols, index=0)
-        pick_pc = st.selectbox("Phillips variable", options=["(none)"] + phillips_cols, index=0)
-        pick_tr = st.selectbox("Taylor variable", options=["(none)"] + taylor_cols, index=0)
-
-        kind = st.radio("Data type", ["raw", "trend", "cycle", "raw_trend"], index=0, horizontal=True)
-        year_range = st.slider("Year range", min_value=year_min, max_value=year_max, value=(year_min, year_max), step=1)
-
-    with cR:
-        # Resolve selection priority: Taylor > Phillips > IS > General
-        if pick_tr != "(none)":
-            var, df = pick_tr, taylor_df
-        elif pick_pc != "(none)":
-            var, df = pick_pc, phillips_df
-        elif pick_is != "(none)":
-            var, df = pick_is, is_curve_df
-        else:
-            var, df = general, data
-
-        mask = (df['Year'] >= year_range[0]) & (df['Year'] <= year_range[1])
-        dfv = df.loc[mask].copy()
-
-        overlay = None
-        overlay_name = ""
-        if show_gdp and var == "Potential Output" and "Real GDP Expenditure" in dfv.columns:
-            overlay = dfv["Real GDP Expenditure"]
-            overlay_name = "Real GDP"
-
-        fig = plot_indicator(dfv, "Date", var, kind, f"{var} ({year_range[0]}–{year_range[1]})",
-                             overlay_series=overlay, overlay_name=overlay_name if overlay is not None else None)
-        st.plotly_chart(fig, use_container_width=True)
 
 
