@@ -4,12 +4,13 @@
 #   1) Original model (DSGE.xlsx): IS (DlogGDP), Phillips (Dlog_CPI), Taylor (Nominal rate)
 #      - Taylor uses inflation gap (π_t − π*)
 #      - Shocks: IS, Phillips, and Taylor (tightening/easing)
-#      - NEW: Policy shock behavior selector:
+#      - Policy shock behavior selector:
 #          • Add after smoothing (default)
 #          • Add to target (inside 1−ρ)
 #          • Force local jump (override)  ← Guarantees an uptick/downtick vs last period
 #      - LaTeX equations shown below charts
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
+#      - NOW with symbol meanings and tooltips on the dashboard
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -50,15 +51,15 @@ def fmt_coef(x: float, nd: int = 3) -> str:
 # =========================
 @dataclass
 class NKParamsSimple:
-    sigma: float = 1.00
-    kappa: float = 0.10
-    phi_pi: float = 1.50
-    phi_x: float = 0.125
-    rho_i: float = 0.80
-    rho_x: float = 0.50
-    rho_r: float = 0.80
-    rho_u: float = 0.50
-    gamma_pi: float = 0.50  # inertia
+    sigma: float = 1.00   # σ: demand sensitivity to real rate (higher = less sensitive)
+    kappa: float = 0.10   # κ: slope of NK Phillips curve (how demand moves inflation)
+    phi_pi: float = 1.50  # φπ: policy response to inflation
+    phi_x: float = 0.125  # φx: policy response to output gap
+    rho_i: float = 0.80   # ρi: interest rate smoothing
+    rho_x: float = 0.50   # ρx: persistence of output gap
+    rho_r: float = 0.80   # ρr: persistence of demand (natural-rate) shock
+    rho_u: float = 0.50   # ρu: persistence of cost-push shock
+    gamma_pi: float = 0.50  # γπ: inflation inertia
 
 class SimpleNK3EqBuiltIn:
     def __init__(self, params: Optional[NKParamsSimple] = None):
@@ -92,6 +93,7 @@ class SimpleNK3EqBuiltIn:
             pi_lag = pi[t-1] if t>0 else 0.0
             i_lag = i[t-1] if t>0 else 0.0
 
+            # Solve contemporaneously for x_t given policy rule and Phillips
             A_x = (1 - p.rho_i) * (p.phi_pi * p.kappa + p.phi_x) - p.kappa
             B_const = (
                 p.rho_i * i_lag
@@ -156,21 +158,56 @@ with st.sidebar:
 
     else:
         st.header("Simple NK parameters (pp units)")
-        sigma = st.slider("σ", 0.2, 5.0, 1.00, 0.05)
-        kappa = st.slider("κ", 0.01, 0.50, 0.10, 0.01)
-        phi_pi = st.slider("φπ", 1.0, 3.0, 1.50, 0.05)
-        phi_x = st.slider("φx", 0.00, 1.00, 0.125, 0.005)
-        rho_i = st.slider("ρi", 0.0, 0.98, 0.80, 0.02)
-        rho_x = st.slider("ρx", 0.0, 0.98, 0.50, 0.02)
-        rho_r = st.slider("ρr", 0.0, 0.98, 0.80, 0.02)
-        rho_u = st.slider("ρu", 0.0, 0.98, 0.50, 0.02)
-        gamma_pi = st.slider("γπ", 0.0, 0.95, 0.50, 0.05)
+        # Parameter sliders with symbol meanings + tooltips
+        sigma = st.slider("σ — Demand sensitivity denominator",
+                          0.2, 5.0, 1.00, 0.05,
+                          help="σ controls how strongly real interest rates affect the output gap x_t. "
+                               "Lower σ ⇒ stronger effect of rates (more interest-sensitive demand).")
+        kappa = st.slider("κ — Phillips slope",
+                          0.01, 0.50, 0.10, 0.01,
+                          help="κ links the output gap x_t to inflation π_t. Higher κ ⇒ demand moves inflation more.")
+        phi_pi = st.slider("φπ — Policy response to inflation",
+                           1.0, 3.0, 1.50, 0.05,
+                           help="φπ governs how aggressively the policy rate reacts to inflation deviations from target.")
+        phi_x = st.slider("φx — Policy response to output gap",
+                          0.00, 1.00, 0.125, 0.005,
+                          help="φx governs how strongly the policy rate reacts to the output gap x_t.")
+        rho_i = st.slider("ρi — Policy rate smoothing",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="ρi is persistence in interest rates. Higher ρi ⇒ smaller quarter-to-quarter changes.")
+        rho_x = st.slider("ρx — Output persistence",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="ρx controls how much the output gap x_t carries over from last quarter.")
+        rho_r = st.slider("ρr — Demand-shock persistence",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="ρr sets how long a demand (natural-rate) shock r^n_t lingers.")
+        rho_u = st.slider("ρu — Cost-push shock persistence",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="ρu sets how long a cost-push shock u_t (e.g., oil spike) lingers.")
+        gamma_pi = st.slider("γπ — Inflation inertia",
+                             0.0, 0.95, 0.50, 0.05,
+                             help="γπ determines how much last quarter’s inflation carries into this quarter.")
 
         st.header("Shock")
-        shock_type_nk = st.selectbox("Shock type", ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"], index=0)
-        shock_size_pp_nk = st.number_input("Shock size (pp)", value=1.00, step=0.25, format="%.2f")
-        shock_quarter_nk = st.slider("Shock timing (t)", 1, T-1, 1, 1)
-        shock_persist_nk = st.slider("Shock persistence ρ_shock", 0.0, 0.98, 0.80, 0.02)
+        shock_type_nk = st.selectbox(
+            "Shock type (what we 'poke')",
+            ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
+            index=0,
+            help="Demand shock (r^n_t): shifts desired spending; Cost-push (u_t): one-off inflation burst; "
+                 "Policy: direct surprise in the policy rate."
+        )
+        shock_size_pp_nk = st.number_input(
+            "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
+            help="Size of the one-time shock at the chosen quarter, in pp (e.g., 1.00 = one percentage point)."
+        )
+        shock_quarter_nk = st.slider(
+            "Shock timing t (quarter index)", 1, T-1, 1, 1,
+            help="Quarter when the shock hits. Plot shows baseline vs. shocked paths."
+        )
+        shock_persist_nk = st.slider(
+            "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
+            help="AR(1) persistence for r^n_t or u_t. Policy shock is one-off (no AR persistence)."
+        )
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -523,38 +560,67 @@ try:
         code = label_to_code[shock_type_nk]
         t0 = max(0, min(T-1, shock_quarter_nk - 1))
 
+        # Quick model key displayed on the page
+        st.info("**Model key (Simple NK):**  "
+                r"$x_t$ = output gap (pp),  "
+                r"$\pi_t$ = inflation (pp),  "
+                r"$i_t$ = nominal policy rate (pp).  "
+                r"$r_t^n$ = demand/natural-rate shock (pp),  "
+                r"$u_t$ = cost-push shock (pp).")
+
+        # Baseline (size 0) vs Shock
         h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, shock_persist_nk)
         h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, shock_persist_nk)
 
+        # Plot IRFs (all in pp)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
         axes[0].plot(h, x0, linewidth=2, label="Baseline")
         axes[0].plot(h, xS, linewidth=2, label="Shock")
-        axes[0].axvline(t0, **vline_kwargs); axes[0].set_title("Output Gap (pp)"); axes[0].set_ylabel("pp")
+        axes[0].axvline(t0, **vline_kwargs); axes[0].set_title("Output Gap (x_t, pp)"); axes[0].set_ylabel("pp")
         axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
 
         axes[1].plot(h, pi0, linewidth=2, label="Baseline")
         axes[1].plot(h, piS, linewidth=2, label="Shock")
-        axes[1].axvline(t0, **vline_kwargs); axes[1].set_title("Inflation (pp)"); axes[1].set_ylabel("pp")
+        axes[1].axvline(t0, **vline_kwargs); axes[1].set_title("Inflation (π_t, pp)"); axes[1].set_ylabel("pp")
         axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
         axes[2].plot(h, i0, linewidth=2, label="Baseline")
         axes[2].plot(h, iS, linewidth=2, label="Shock")
-        axes[2].axvline(t0, **vline_kwargs); axes[2].set_title("Nominal Policy Rate (pp)")
+        axes[2].axvline(t0, **vline_kwargs); axes[2].set_title("Nominal Policy Rate (i_t, pp)")
         axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("pp")
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
         plt.tight_layout(); st.pyplot(fig)
 
         with st.expander("Simple NK equations"):
-            st.latex(r"x_t = \rho_x x_{t-1} - \frac{1}{\sigma}( i_t - \pi_{t+1} - r^n_t )")
-            st.latex(r"\pi_t = \gamma_\pi \pi_{t-1} + \kappa x_t + u_t")
-            st.latex(r"i_t = \rho_i i_{t-1} + (1-\rho_i)(\phi_\pi \pi_t + \phi_x x_t) + \varepsilon^i_t")
+            st.latex(r"x_t = \rho_x x_{t-1} \;-\; \frac{1}{\sigma}\big( i_t - \pi_{t+1} - r^n_t \big)")
+            st.latex(r"\pi_t = \gamma_\pi \pi_{t-1} \;+\; \kappa x_t \;+\; u_t")
+            st.latex(r"i_t = \rho_i i_{t-1} \;+\; (1-\rho_i)(\phi_\pi \pi_t + \phi_x x_t) \;+\; \varepsilon^i_t")
+
+        with st.expander("Symbol glossary (Simple NK)"):
+            st.markdown(
+                r"""
+- **$x_t$** — Output gap (percentage points, pp), activity above/below normal.  
+- **$\pi_t$** — Inflation (pp).  
+- **$i_t$** — Nominal policy rate (pp).  
+- **$r_t^n$** — Demand / natural-rate shock (pp), AR(1) with $\rho_r$.  
+- **$u_t$** — Cost-push shock (pp), AR(1) with $\rho_u$.  
+- **$\sigma$** — Demand sensitivity denominator: lower $\sigma$ ⇒ rates move demand more.  
+- **$\kappa$** — Phillips slope: how strongly $x_t$ moves $\pi_t$.  
+- **$\phi_\pi$** — Policy response to inflation.  
+- **$\phi_x$** — Policy response to output gap.  
+- **$\rho_i$** — Rate smoothing (persistence of $i_t$).  
+- **$\rho_x$** — Persistence of output gap.  
+- **$\rho_r$** — Persistence of demand shock $r_t^n$.  
+- **$\rho_u$** — Persistence of cost-push shock $u_t$.  
+- **$\gamma_\pi$** — Inflation inertia (carryover of $\pi_{t-1}$).  
+- **Shock size (pp)** — One-off change at time $t_0$ (e.g., +1.00 pp).
+                """
+            )
 
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
-
-
