@@ -10,7 +10,7 @@
 #          • Force local jump (override)  ← Guarantees an uptick/downtick vs last period
 #      - LaTeX equations shown below charts
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
-#      - NOW with symbol meanings and tooltips on the dashboard
+#      - NOW clearly shows which parameters affect which curve
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -157,44 +157,62 @@ with st.sidebar:
         )
 
     else:
+        # ======= Parameter → Curve map (quick card) =======
+        st.info("**Which parameters affect which curve?**  \n"
+                "• **IS (Demand)**: σ, ρx, ρr  \n"
+                "• **Phillips (Supply)**: κ, γπ, ρu  \n"
+                "• **Taylor Rule (Policy)**: φπ, φx, ρi")
+
         st.header("Simple NK parameters (pp units)")
-        # Parameter sliders with symbol meanings + tooltips
+
+        # -------- IS (Demand) --------
+        st.subheader("IS Curve (Demand): controls how rates and shocks move activity (x_t)")
         sigma = st.slider("σ — Demand sensitivity denominator",
                           0.2, 5.0, 1.00, 0.05,
-                          help="σ controls how strongly real interest rates affect the output gap x_t. "
-                               "Lower σ ⇒ stronger effect of rates (more interest-sensitive demand).")
-        kappa = st.slider("κ — Phillips slope",
-                          0.01, 0.50, 0.10, 0.01,
-                          help="κ links the output gap x_t to inflation π_t. Higher κ ⇒ demand moves inflation more.")
-        phi_pi = st.slider("φπ — Policy response to inflation",
-                           1.0, 3.0, 1.50, 0.05,
-                           help="φπ governs how aggressively the policy rate reacts to inflation deviations from target.")
-        phi_x = st.slider("φx — Policy response to output gap",
-                          0.00, 1.00, 0.125, 0.005,
-                          help="φx governs how strongly the policy rate reacts to the output gap x_t.")
-        rho_i = st.slider("ρi — Policy rate smoothing",
-                          0.0, 0.98, 0.80, 0.02,
-                          help="ρi is persistence in interest rates. Higher ρi ⇒ smaller quarter-to-quarter changes.")
+                          help="Affects the **IS curve**. Lower σ ⇒ a given real rate change moves x_t more; "
+                               "higher σ ⇒ x_t reacts less.")
         rho_x = st.slider("ρx — Output persistence",
                           0.0, 0.98, 0.50, 0.02,
-                          help="ρx controls how much the output gap x_t carries over from last quarter.")
-        rho_r = st.slider("ρr — Demand-shock persistence",
+                          help="Affects the **IS curve** dynamics. Higher ρx ⇒ x_t is more persistent.")
+        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)",
                           0.0, 0.98, 0.80, 0.02,
-                          help="ρr sets how long a demand (natural-rate) shock r^n_t lingers.")
-        rho_u = st.slider("ρu — Cost-push shock persistence",
-                          0.0, 0.98, 0.50, 0.02,
-                          help="ρu sets how long a cost-push shock u_t (e.g., oil spike) lingers.")
+                          help="Affects **IS shock path**. Higher ρr ⇒ demand shock fades more slowly.")
+        st.caption("**IS takeaway:** Lower σ or higher ρx/ρr → output gap moves more/longer after shocks.")
+
+        # -------- Phillips (Supply) --------
+        st.subheader("Phillips Curve (Supply): links activity to inflation (π_t)")
+        kappa = st.slider("κ — Phillips slope",
+                          0.01, 0.50, 0.10, 0.01,
+                          help="Affects the **Phillips curve**. Higher κ ⇒ x_t has a bigger impact on π_t.")
         gamma_pi = st.slider("γπ — Inflation inertia",
                              0.0, 0.95, 0.50, 0.05,
-                             help="γπ determines how much last quarter’s inflation carries into this quarter.")
+                             help="Affects the **Phillips curve** persistence. Higher γπ ⇒ more carryover from π_{t-1}.")
+        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="Affects **Phillips shock path**. Higher ρu ⇒ cost-push shocks linger.")
+        st.caption("**Phillips takeaway:** Higher κ/γπ or higher ρu → inflation moves more and/or fades slower.")
 
+        # -------- Taylor Rule (Policy) --------
+        st.subheader("Taylor Rule (Policy): sets the interest rate (i_t)")
+        phi_pi = st.slider("φπ — Response to inflation",
+                           1.0, 3.0, 1.50, 0.05,
+                           help="Affects the **Taylor rule**. Larger φπ ⇒ stronger rate moves when inflation deviates from target.")
+        phi_x = st.slider("φx — Response to output gap",
+                          0.00, 1.00, 0.125, 0.005,
+                          help="Affects the **Taylor rule**. Larger φx ⇒ stronger response to x_t.")
+        rho_i = st.slider("ρi — Policy rate smoothing",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="Affects **policy persistence**. Higher ρi ⇒ rates adjust more gradually.")
+        st.caption("**Taylor takeaway:** Larger φπ/φx → stronger policy reaction; higher ρi → smoother, slower moves.")
+
+        # ---- Shock controls ----
+        st.divider()
         st.header("Shock")
         shock_type_nk = st.selectbox(
             "Shock type (what we 'poke')",
             ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
             index=0,
-            help="Demand shock (r^n_t): shifts desired spending; Cost-push (u_t): one-off inflation burst; "
-                 "Policy: direct surprise in the policy rate."
+            help="Demand shock (r^n_t) ⇒ IS; Cost-push (u_t) ⇒ Phillips; Policy shock ⇒ Taylor."
         )
         shock_size_pp_nk = st.number_input(
             "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
@@ -206,7 +224,7 @@ with st.sidebar:
         )
         shock_persist_nk = st.slider(
             "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
-            help="AR(1) persistence for r^n_t or u_t. Policy shock is one-off (no AR persistence)."
+            help="AR(1) persistence for r^n_t or u_t. Policy shock is one-off (no AR)."
         )
 
 # =========================
@@ -385,14 +403,12 @@ def simulate_original(
 
         else:  # Force local jump (override)
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
-            # Determine intended direction at this t
             if eps > 0:  # tightening
                 min_jump = abs(eps)
                 i_raw = max(i_raw, i[t - 1] + min_jump)
             elif eps < 0:  # easing
                 min_jump = abs(eps)
                 i_raw = min(i_raw, i[t - 1] - min_jump)
-            # if eps == 0, leave as is
 
         i[t] = float(i_raw)
 
@@ -560,7 +576,7 @@ try:
         code = label_to_code[shock_type_nk]
         t0 = max(0, min(T-1, shock_quarter_nk - 1))
 
-        # Quick model key displayed on the page
+        # Model key displayed on the page
         st.info("**Model key (Simple NK):**  "
                 r"$x_t$ = output gap (pp),  "
                 r"$\pi_t$ = inflation (pp),  "
@@ -608,15 +624,15 @@ try:
 - **$i_t$** — Nominal policy rate (pp).  
 - **$r_t^n$** — Demand / natural-rate shock (pp), AR(1) with $\rho_r$.  
 - **$u_t$** — Cost-push shock (pp), AR(1) with $\rho_u$.  
-- **$\sigma$** — Demand sensitivity denominator: lower $\sigma$ ⇒ rates move demand more.  
-- **$\kappa$** — Phillips slope: how strongly $x_t$ moves $\pi_t$.  
-- **$\phi_\pi$** — Policy response to inflation.  
-- **$\phi_x$** — Policy response to output gap.  
-- **$\rho_i$** — Rate smoothing (persistence of $i_t$).  
-- **$\rho_x$** — Persistence of output gap.  
-- **$\rho_r$** — Persistence of demand shock $r_t^n$.  
-- **$\rho_u$** — Persistence of cost-push shock $u_t$.  
-- **$\gamma_\pi$** — Inflation inertia (carryover of $\pi_{t-1}$).  
+- **$\sigma$** — IS curve: lower ⇒ rates move $x_t$ more; higher ⇒ $x_t$ reacts less.  
+- **$\rho_x$** — IS curve: persistence of $x_t$.  
+- **$\rho_r$** — IS shock persistence.  
+- **$\kappa$** — Phillips curve: strength of $x_t \to \pi_t$.  
+- **$\gamma_\pi$** — Phillips curve: inflation inertia.  
+- **$\rho_u$** — Phillips shock persistence.  
+- **$\phi_\pi$** — Taylor rule: reaction to inflation.  
+- **$\phi_x$** — Taylor rule: reaction to output gap.  
+- **$\rho_i$** — Taylor rule: interest-rate smoothing.  
 - **Shock size (pp)** — One-off change at time $t_0$ (e.g., +1.00 pp).
                 """
             )
@@ -624,3 +640,5 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
+
