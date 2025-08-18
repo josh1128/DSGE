@@ -157,19 +157,6 @@ with st.sidebar:
     st.header("Simulation settings")
     T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
 
-    # ---- NEW: compact function guide in the sidebar ----
-    with st.expander("DSGE model — what each function does", expanded=False):
-        st.markdown(
-            "- **ensure_decimal_rate**: Converts percent-like rates (e.g., 3.2) to decimals (0.032).\n"
-            "- **build_latex_equation**: Renders the estimated equation in LaTeX for display.\n"
-            "- **row_from_params**: Builds a one-row DataFrame aligned to a model’s parameter order for `.predict()`.\n"
-            "- **load_and_prepare_original**: Loads Excel sheets, merges by date, standardizes units, and creates basic lags.\n"
-            "- **fit_models_original**: Fits **IS**, **Phillips**, and **Taylor** OLS regressions; computes star-form (α*, φπ*, φg*) from the partial-adjustment rule.\n"
-            "- **build_shocks_original**: Creates shock paths (IS, Phillips, or Policy) with optional persistence ρ.\n"
-            "- **simulate_original**: Steps the system forward to produce paths for GDP growth, inflation, and the policy rate under chosen shocks and policy mode.\n"
-            "- **SimpleNK3EqBuiltIn.irf**: Generates impulse responses from a small 3-equation NK model without Excel."
-        )
-
     if model_choice == "Original (DSGE.xlsx)":
         xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original", help="If omitted, the app looks for 'DSGE.xlsx' next to this script.")
         fallback = Path(__file__).parent / "DSGE.xlsx"
@@ -712,6 +699,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
