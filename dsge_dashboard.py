@@ -164,27 +164,68 @@ with st.sidebar:
                 "• **Taylor Rule (Policy)**: φπ, φx, ρi")
 
         st.header("Simple NK parameters (pp units)")
-        st.subheader("IS Curve (Demand)")
-        sigma = st.slider("σ — Demand sensitivity denominator", 0.2, 5.0, 1.00, 0.05)
-        rho_x = st.slider("ρx — Output persistence", 0.0, 0.98, 0.50, 0.02)
-        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)", 0.0, 0.98, 0.80, 0.02)
 
-        st.subheader("Phillips Curve (Supply)")
-        kappa = st.slider("κ — Phillips slope", 0.01, 0.50, 0.10, 0.01)
-        gamma_pi = st.slider("γπ — Inflation inertia", 0.0, 0.95, 0.50, 0.05)
-        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)", 0.0, 0.98, 0.50, 0.02)
+        # -------- IS (Demand) --------
+        st.subheader("IS Curve (Demand): controls how rates and shocks move activity (x_t)")
+        sigma = st.slider("σ — Demand sensitivity denominator",
+                          0.2, 5.0, 1.00, 0.05,
+                          help="Affects the **IS curve**. Lower σ ⇒ a given real rate change moves x_t more; "
+                               "higher σ ⇒ x_t reacts less.")
+        rho_x = st.slider("ρx — Output persistence",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="Affects the **IS curve** dynamics. Higher ρx ⇒ x_t is more persistent.")
+        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="Affects **IS shock path**. Higher ρr ⇒ demand shock fades more slowly.")
+        st.caption("**IS takeaway:** Lower σ or higher ρx/ρr → output gap moves more/longer after shocks.")
 
-        st.subheader("Taylor Rule (Policy)")
-        phi_pi = st.slider("φπ — Response to inflation", 1.0, 3.0, 1.50, 0.05)
-        phi_x = st.slider("φx — Response to output gap", 0.00, 1.00, 0.125, 0.005)
-        rho_i = st.slider("ρi — Policy rate smoothing", 0.0, 0.98, 0.80, 0.02)
+        # -------- Phillips (Supply) --------
+        st.subheader("Phillips Curve (Supply): links activity to inflation (π_t)")
+        kappa = st.slider("κ — Phillips slope",
+                          0.01, 0.50, 0.10, 0.01,
+                          help="Affects the **Phillips curve**. Higher κ ⇒ x_t has a bigger impact on π_t.")
+        gamma_pi = st.slider("γπ — Inflation inertia",
+                             0.0, 0.95, 0.50, 0.05,
+                             help="Affects the **Phillips curve** persistence. Higher γπ ⇒ more carryover from π_{t-1}.")
+        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="Affects **Phillips shock path**. Higher ρu ⇒ cost-push shocks linger.")
+        st.caption("**Phillips takeaway:** Higher κ/γπ or higher ρu → inflation moves more and/or fades slower.")
 
+        # -------- Taylor Rule (Policy) --------
+        st.subheader("Taylor Rule (Policy): sets the interest rate (i_t)")
+        phi_pi = st.slider("φπ — Response to inflation",
+                           1.0, 3.0, 1.50, 0.05,
+                           help="Affects the **Taylor rule**. Larger φπ ⇒ stronger rate moves when inflation deviates from target.")
+        phi_x = st.slider("φx — Response to output gap",
+                          0.00, 1.00, 0.125, 0.005,
+                          help="Affects the **Taylor rule**. Larger φx ⇒ stronger response to x_t.")
+        rho_i = st.slider("ρi — Policy rate smoothing",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="Affects **policy persistence**. Higher ρi ⇒ rates adjust more gradually.")
+        st.caption("**Taylor takeaway:** Larger φπ/φx → stronger policy reaction; higher ρi → smoother, slower moves.")
+
+        # ---- Shock controls ----
         st.divider()
         st.header("Shock")
-        shock_type_nk = st.selectbox("Shock type", ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"], index=0)
-        shock_size_pp_nk = st.number_input("Shock size (pp)", value=1.00, step=0.25, format="%.2f")
-        shock_quarter_nk = st.slider("Shock timing t (quarter index)", 1, T-1, 1, 1)
-        shock_persist_nk = st.slider("Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02)
+        shock_type_nk = st.selectbox(
+            "Shock type (what we 'poke')",
+            ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
+            index=0,
+            help="Demand shock (r^n_t) ⇒ IS; Cost-push (u_t) ⇒ Phillips; Policy shock ⇒ Taylor."
+        )
+        shock_size_pp_nk = st.number_input(
+            "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
+            help="Size of the one-time shock at the chosen quarter, in pp (e.g., 1.00 = one percentage point)."
+        )
+        shock_quarter_nk = st.slider(
+            "Shock timing t (quarter index)", 1, T-1, 1, 1,
+            help="Quarter when the shock hits. Plot shows baseline vs. shocked paths."
+        )
+        shock_persist_nk = st.slider(
+            "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
+            help="AR(1) persistence for r^n_t or u_t. Policy shock is one-off (no AR)."
+        )
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -220,19 +261,16 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
 
     df["Nominal Rate"] = ensure_decimal_rate(df["Nominal Rate"])
 
-    # Lags
-    df["DlogGDP_L1"] = df["DlogGDP"].shift(1)      # kept for Phillips, not used in IS anymore
+    df["DlogGDP_L1"] = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"] = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"] = df["Nominal Rate"].shift(1)
-    # Real rate LAG IS NOW t-1 (column name retained for compatibility)
-    df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(1)
+    df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
 
     required_cols = [
-        "DlogGDP", "Dlog_CPI", "Dlog_CPI_L1",
+        "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
         "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
         "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
         "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1",
-        # Note: DlogGDP_L1 no longer required by IS; still exists for Phillips.
     ]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -244,14 +282,14 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
     return df, df_est
 
 def fit_models_original(df_est: pd.DataFrame, pi_star_quarterly: float):
-    # === IS (ΔlogGDP) — remove ΔlogGDP_{t-1} regressor ===
+    # IS
     X_is = sm.add_constant(df_est[[
-        "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
+        "DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
     ]])
     y_is = df_est["DlogGDP"]
     model_is = sm.OLS(y_is, X_is).fit()
 
-    # Phillips (unchanged, still uses DlogGDP_L1)
+    # Phillips
     X_pc = sm.add_constant(df_est[[
         "Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"
     ]])
@@ -327,13 +365,12 @@ def simulate_original(
     if policy_shock_arr is None: policy_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        # Real rate now uses lag 1 (fallback to sample mean at t==0)
-        rr_lag1 = (i[t - 1] - p[t - 1]) if t >= 1 else real_rate_mean_dec
+        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
 
-        # === IS prediction WITHOUT DlogGDP_{t-1} ===
         Xis = pd.DataFrame([{
             "const": 1.0,
-            "Real_Rate_L2_data": rr_lag1,  # name retained; value at lag-1
+            "DlogGDP_L1": g[t - 1],
+            "Real_Rate_L2_data": rr_lag2,
             "Dlog FD_Lag1": means["Dlog FD_Lag1"],
             "Dlog_REER": means["Dlog_REER"],
             "Dlog_Energy": means["Dlog_Energy"],
@@ -341,7 +378,6 @@ def simulate_original(
         }])
         g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
 
-        # Phillips (unchanged)
         Xpc = pd.DataFrame([{
             "const": 1.0,
             "Dlog_CPI_L1": p[t - 1],
@@ -361,14 +397,18 @@ def simulate_original(
 
         if policy_mode.startswith("Add after"):
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
+
         elif policy_mode.startswith("Add to target"):
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + eps)
+
         else:  # Force local jump (override)
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
-            if eps > 0:
-                i_raw = max(i_raw, i[t - 1] + abs(eps))
-            elif eps < 0:
-                i_raw = min(i_raw, i[t - 1] - abs(eps))
+            if eps > 0:  # tightening
+                min_jump = abs(eps)
+                i_raw = max(i_raw, i[t - 1] + min_jump)
+            elif eps < 0:  # easing
+                min_jump = abs(eps)
+                i_raw = min(i_raw, i[t - 1] - min_jump)
 
         i[t] = float(i_raw)
 
@@ -460,24 +500,25 @@ try:
         alpha_star = models_o["alpha_star"]; phi_pi_star = models_o["phi_pi_star"]; phi_g_star = models_o["phi_g_star"]
         rho_hat = models_o["rho_hat"]
 
-        # IS (without ΔlogGDP_{t-1})
+        # IS
         c_is = float(m_is.params["const"])
-        a_rr = float(m_is.params["Real_Rate_L2_data"])
-        a_fd = float(m_is.params["Dlog FD_Lag1"])
-        a_reer = float(m_is.params["Dlog_REER"])
-        a_en = float(m_is.params["Dlog_Energy"])
-        a_non = float(m_is.params["Dlog_NonEnergy"])
+        a1 = float(m_is.params["DlogGDP_L1"])
+        a2 = float(m_is.params["Real_Rate_L2_data"])
+        a3 = float(m_is.params["Dlog FD_Lag1"])
+        a4 = float(m_is.params["Dlog_REER"])
+        a5 = float(m_is.params["Dlog_Energy"])
+        a6 = float(m_is.params["Dlog_NonEnergy"])
         st.markdown("**IS Curve (\\(\\Delta \\log GDP_t\\))**")
         st.latex(
             r"""
             \begin{aligned}
-            \Delta \log GDP_t &= {c}\; {a_rr}\,RR_{t-1} \; {a_fd}\,\Delta \log FD_{t-1} \\
-                              &\quad {a_reer}\,\Delta \log REER_t \; {a_en}\,\Delta \log Energy_t \; {a_non}\,\Delta \log NonEnergy_t \; + \varepsilon_t
+            \Delta \log GDP_t &= {c} \; {a1}\,\Delta \log GDP_{t-1} \; {a2}\,RR_{t-2} \; {a3}\,\Delta \log FD_{t-1} \\
+                              &\quad {a4}\,\Delta \log REER_t \; {a5}\,\Delta \log Energy_t \; {a6}\,\Delta \log NonEnergy_t \; + \varepsilon_t
             \end{aligned}
             """.replace("{c}", f"{c_is:.3f}")
-             .replace("{a_rr}", fmt_coef(a_rr)).replace("{a_fd}", fmt_coef(a_fd))
-             .replace("{a_reer}", fmt_coef(a_reer)).replace("{a_en}", fmt_coef(a_en))
-             .replace("{a_non}", fmt_coef(a_non))
+             .replace("{a1}", fmt_coef(a1)).replace("{a2}", fmt_coef(a2))
+             .replace("{a3}", fmt_coef(a3)).replace("{a4}", fmt_coef(a4))
+             .replace("{a5}", fmt_coef(a5)).replace("{a6}", fmt_coef(a6))
         )
 
         # Phillips
@@ -535,16 +576,19 @@ try:
         code = label_to_code[shock_type_nk]
         t0 = max(0, min(T-1, shock_quarter_nk - 1))
 
+        # Model key displayed on the page
         st.info("**Model key (Simple NK):**  "
                 r"$x_t$ = output gap (pp),  "
                 r"$\pi_t$ = inflation (pp),  "
                 r"$i_t$ = nominal policy rate (pp).  "
-                r"$r_t^n$ = demand shock (pp),  "
+                r"$r_t^n$ = demand/natural-rate shock (pp),  "
                 r"$u_t$ = cost-push shock (pp).")
 
+        # Baseline (size 0) vs Shock
         h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, shock_persist_nk)
         h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, shock_persist_nk)
 
+        # Plot IRFs (all in pp)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
@@ -596,5 +640,6 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
