@@ -353,12 +353,6 @@ def fit_models_original(
     y_is = df_est["DlogGDP"]
     model_is = sm.OLS(y_is, X_is).fit()
 
-    # ---- Force Real_Rate_L2_data coefficient non-positive ----
-    if "Real_Rate_L2_data" in model_is.params.index:
-        params = model_is.params.copy()
-        params["Real_Rate_L2_data"] = -abs(params["Real_Rate_L2_data"])  # ensures ≤ 0
-        model_is.params.update(params)  # update for downstream predict/display
-
     # Phillips
     if not pc_selected:
         raise ValueError("Select at least one regressor for Phillips (besides constant).")
@@ -705,6 +699,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
