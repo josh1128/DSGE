@@ -50,19 +50,19 @@ def fmt_coef(x: float, nd: int = 3) -> str:
 def build_latex_equation(const_val: float, terms: List[tuple], lhs: str, eps_symbol: str) -> str:
     """
     terms: list of tuples (coef_value, pretty_symbol)
-    Returns a LaTeX aligned equation string.
+    Returns a LaTeX aligned equation string, safe for Streamlit.
     """
     if not terms:
-        rhs_terms = " "
+        rhs_terms = ""
     else:
         rhs_terms = " ".join([f"{fmt_coef(c)}\\,{sym}" for (c, sym) in terms])
+
     eq = rf"""
-    \begin{aligned}
-    {lhs} &= {const_val:.3f} \; {rhs_terms} \; + {eps_symbol}
-    \end{aligned}
+    \begin{{aligned}}
+    {lhs} &= {const_val:.3f} {rhs_terms} + {eps_symbol}
+    \end{{aligned}}
     """
     return eq
-
 def row_from_params(params_index: pd.Index, values: Dict[str, float]) -> pd.DataFrame:
     """
     Create a one-row DataFrame for prediction with columns ordered to match model.params.index.
@@ -676,6 +676,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
