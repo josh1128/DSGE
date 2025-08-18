@@ -202,22 +202,30 @@ with st.sidebar:
         st.divider()
         st.header("Variable selection (include/exclude)")
 
-        IS_ALL = ["DlogGDP_L1", "Real_Rate_L2_data", "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"]
+        # Default to the ex-ante real rate in the IS list
+        IS_ALL = [
+            "DlogGDP_L1",
+            "Real_Rate_L2_exante",  # ex-ante (Nominal - expected inflation), lag 2
+            # You can also try one of these (uncomment to expose in UI):
+            # "Real_Rate_L2_data",   # ex-post (Nominal - realized inflation), lag 2
+            # "Real_Rate_Gap_L2",    # ex-ante gap vs r* proxy, lag 2
+            "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy"
+        ]
         PC_ALL = ["Dlog_CPI_L1", "DlogGDP_L1", "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1"]
         TR_ALL = ["Nominal_Rate_L1", "Inflation_Gap", "DlogGDP"]
 
         with st.expander("IS Curve regressors", expanded=True):
             is_selected = st.multiselect("Use these variables in the IS regression:",
                                          IS_ALL, default=IS_ALL, key="is_vars",
-                                         help="Pick the demand-side drivers used to explain Δlog GDP.")
+                                         help="Demand block. Default real-rate regressor uses expected inflation (ex-ante).")
         with st.expander("Phillips Curve regressors", expanded=True):
             pc_selected = st.multiselect("Use these variables in the Phillips regression:",
                                          PC_ALL, default=PC_ALL, key="pc_vars",
-                                         help="Pick the price-setting drivers used to explain Δlog CPI.")
+                                         help="Price-setting drivers used to explain Δlog CPI.")
         with st.expander("Taylor Rule regressors", expanded=True):
             tr_selected = st.multiselect("Use these variables in the Taylor (partial adjustment) regression:",
                                          TR_ALL, default=TR_ALL, key="tr_vars",
-                                         help="Pick the policy rule inputs. ‘Inflation_Gap’ = Δlog CPI − π*.")
+                                         help="Policy rule inputs. ‘Inflation_Gap’ = Δlog CPI − π*.")
 
     else:
         # ======= Parameter → Curve map (quick card) =======
@@ -285,7 +293,7 @@ with st.sidebar:
 # =========================
 @st.cache_data(show_spinner=True)
 def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Read Excel, merge sheets, set dates/units, and create basic lagged fields used by the regressions."""
+    """Read Excel, merge sheets, set dates/units, add ex-ante real rate, and create lagged fields."""
     if file_like_or_path is None:
         raise FileNotFoundError("Upload DSGE.xlsx or place it beside this script.")
 
@@ -313,8 +321,20 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
              .set_index("Date")
     )
 
+    # Units
     df["Nominal Rate"] = ensure_decimal_rate(df["Nominal Rate"])
 
+    # --- Expected inflation (quarterly) and ex-ante real rate (lag 2) ---
+    # EMA(4) proxy for expected inflation at time t (one-year memory)
+    df["pi_exp"] = df["Dlog_CPI"].ewm(span=4, adjust=False).mean()
+    # Ex-ante real rate: nominal minus expected inflation, then lag two periods
+    df["Real_Rate_L2_exante"] = (df["Nominal Rate"] - df["pi_exp"]).shift(2)
+
+    # Optional: r* proxy and real-rate gap (not used by default)
+    rstar = (df["Nominal Rate"] - df["Dlog_CPI"]).rolling(20, min_periods=10).mean()
+    df["Real_Rate_Gap_L2"] = ((df["Nominal Rate"] - df["pi_exp"]) - rstar).shift(2)
+
+    # Legacy fields (still available if you want to compare)
     df["DlogGDP_L1"] = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"] = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"] = df["Nominal Rate"].shift(1)
@@ -322,7 +342,10 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
 
     required_cols = [
         "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
-        "Nominal Rate", "Nominal_Rate_L1", "Real_Rate_L2_data",
+        "Nominal Rate", "Nominal_Rate_L1",
+        # Require ex-ante by default so estimation rows align
+        "Real_Rate_L2_exante",
+        # If you want to use legacy ex-post instead, include "Real_Rate_L2_data" instead of exante above.
         "Dlog FD_Lag1", "Dlog_REER", "Dlog_Energy", "Dlog_NonEnergy",
         "Dlog_Reer_L2", "Dlog_Energy_L1", "Dlog_Non_Energy_L1",
     ]
@@ -416,12 +439,13 @@ def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, 
 
 def simulate_original(
     T: int, rho_sim: float, df_est: pd.DataFrame, models: Dict[str, sm.regression.linear_model.RegressionResultsWrapper],
-    means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float, pi_star_quarterly: float,
+    means: Dict[str, float], i_mean_dec: float, real_rate_exante_mean_dec: float, pi_star_quarterly: float,
     is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)"
 ):
     """
     Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models.
     Applies the chosen policy shock mode and policy smoothing ρ each step.
+    Uses ex-ante real rate proxy (i_{t-2} − π_{t-2}) at runtime, falling back to the sample mean.
     """
     g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
 
@@ -437,16 +461,23 @@ def simulate_original(
     if policy_shock_arr is None: policy_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
+        # Runtime ex-ante proxy: use lagged simulated i and π (known at t-2)
+        if t >= 2:
+            rr_exante_lag2 = i[t - 2] - p[t - 2]
+        else:
+            rr_exante_lag2 = real_rate_exante_mean_dec  # fallback to sample mean
 
         # --- IS predict row (only selected regressors) ---
         vals_is = {
             "DlogGDP_L1": g[t - 1],
-            "Real_Rate_L2_data": rr_lag2,
+            "Real_Rate_L2_exante": rr_exante_lag2,   # <- ex-ante real rate at lag 2
             "Dlog FD_Lag1": means["Dlog FD_Lag1"],
             "Dlog_REER": means["Dlog_REER"],
             "Dlog_Energy": means["Dlog_Energy"],
             "Dlog_NonEnergy": means["Dlog_NonEnergy"],
+            # If user selected alternative real-rate fields, they default to 0 via row_from_params()
+            "Real_Rate_L2_data": 0.0,
+            "Real_Rate_Gap_L2": 0.0,
         }
         Xis = row_from_params(model_is.params.index, vals_is)
         g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
@@ -516,7 +547,8 @@ try:
 
         # Anchors & means
         i_mean_dec = float(df_est["Nominal Rate"].mean())
-        real_rate_mean_dec = float(df_est["Real_Rate_L2_data"].mean())
+        # Use the ex-ante real rate mean for runtime fallback
+        real_rate_exante_mean_dec = float(df_est["Real_Rate_L2_exante"].mean())
         means_o = {
             "Dlog FD_Lag1": float(df_est["Dlog FD_Lag1"].mean()),
             "Dlog_REER": float(df_est["Dlog_REER"].mean()),
@@ -532,11 +564,11 @@ try:
             T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
         )
         g0, p0, i0 = simulate_original(
-            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_exante_mean_dec, pi_star_quarterly,
             policy_mode=policy_mode
         )
         gS, pS, iS = simulate_original(
-            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_exante_mean_dec, pi_star_quarterly,
             is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode
         )
 
@@ -583,7 +615,9 @@ try:
         is_terms = []
         pretty_map_is = {
             "DlogGDP_L1": r"\Delta \log GDP_{t-1}",
-            "Real_Rate_L2_data": r"RR_{t-2}",
+            "Real_Rate_L2_exante": r"RR^{ex\text{-}ante}_{t-2}",
+            "Real_Rate_L2_data": r"RR^{ex\text{-}post}_{t-2}",
+            "Real_Rate_Gap_L2": r"(RR^{ex\text{-}ante}-r^\*)_{t-2}",
             "Dlog FD_Lag1": r"\Delta \log FD_{t-1}",
             "Dlog_REER": r"\Delta \log REER_t",
             "Dlog_Energy": r"\Delta \log Energy_t",
@@ -699,6 +733,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
