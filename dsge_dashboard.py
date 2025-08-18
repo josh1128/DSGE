@@ -264,9 +264,7 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
     df["DlogGDP_L1"] = df["DlogGDP"].shift(1)
     df["Dlog_CPI_L1"] = df["Dlog_CPI"].shift(1)
     df["Nominal_Rate_L1"] = df["Nominal Rate"].shift(1)
-
-    # >>> CHANGED: real rate lag now at t-1 (was t-2)
-    df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(1)
+    df["Real_Rate_L2_data"] = (df["Nominal Rate"] - df["Dlog_CPI"]).shift(2)
 
     required_cols = [
         "DlogGDP", "DlogGDP_L1", "Dlog_CPI", "Dlog_CPI_L1",
@@ -367,13 +365,12 @@ def simulate_original(
     if policy_shock_arr is None: policy_shock_arr = np.zeros(T)
 
     for t in range(1, T):
-        # >>> CHANGED: use lag-1 real rate (fallback to sample mean on t==0)
-        rr_lag1 = (i[t - 1] - p[t - 1]) if t >= 1 else real_rate_mean_dec
+        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
 
         Xis = pd.DataFrame([{
             "const": 1.0,
             "DlogGDP_L1": g[t - 1],
-            "Real_Rate_L2_data": rr_lag1,   # name kept for compatibility; value is now lag-1
+            "Real_Rate_L2_data": rr_lag2,
             "Dlog FD_Lag1": means["Dlog FD_Lag1"],
             "Dlog_REER": means["Dlog_REER"],
             "Dlog_Energy": means["Dlog_Energy"],
@@ -515,7 +512,7 @@ try:
         st.latex(
             r"""
             \begin{aligned}
-            \Delta \log GDP_t &= {c} \; {a1}\,\Delta \log GDP_{t-1} \; {a2}\,RR_{t-1} \; {a3}\,\Delta \log FD_{t-1} \\
+            \Delta \log GDP_t &= {c} \; {a1}\,\Delta \log GDP_{t-1} \; {a2}\,RR_{t-2} \; {a3}\,\Delta \log FD_{t-1} \\
                               &\quad {a4}\,\Delta \log REER_t \; {a5}\,\Delta \log Energy_t \; {a6}\,\Delta \log NonEnergy_t \; + \varepsilon_t
             \end{aligned}
             """.replace("{c}", f"{c_is:.3f}")
