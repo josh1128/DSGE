@@ -353,6 +353,14 @@ def fit_models_original(
     y_is = df_est["DlogGDP"]
     model_is = sm.OLS(y_is, X_is).fit()
 
+    # ---- Force Real_Rate_L2_data coefficient non-positive ----
+    # If present, set the coefficient to -abs(value) to ensure a non-positive (negative or zero) sign.
+    if "Real_Rate_L2_data" in model_is.params.index:
+        params = model_is.params.copy()
+        params["Real_Rate_L2_data"] = -abs(params["Real_Rate_L2_data"])
+        # update in place for downstream usage (predict, display)
+        model_is.params.update(params)
+
     # Phillips
     if not pc_selected:
         raise ValueError("Select at least one regressor for Phillips (besides constant).")
@@ -515,6 +523,7 @@ try:
         models_o = fit_models_original(df_est, pi_star_quarterly, is_selected, pc_selected, tr_selected)
 
         # Anchors & means
+        i_mean_dec = float(df_est["Nominal Rate"].mean"])
         i_mean_dec = float(df_est["Nominal Rate"].mean())
         real_rate_mean_dec = float(df_est["Real_Rate_L2_data"].mean())
         means_o = {
@@ -699,7 +708,6 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
-
 
 
 
