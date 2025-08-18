@@ -9,8 +9,9 @@
 #          • Add to target (inside 1−ρ)
 #          • Force local jump (override)  ← Guarantees an uptick/downtick vs last period
 #      - LaTeX equations shown below charts
-#   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
-#      - NOW clearly shows which parameters affect which curve
+#   2) Levels model (DSGE_Model2.xlsx): Output Gap, Inflation Rate, Nominal Rate — all in levels
+#      - Taylor uses the provided Inflation Gap (π_t − π*), target-form recovered from partial adjustment
+#   3) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -30,13 +31,15 @@ st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 
 st.markdown(
     "- **Original**: GDP & CPI in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
-    "- **Taylor** uses **inflation gap**: \\(\\pi_t - \\pi^*\\)."
+    "- **Levels**: Output Gap & Inflation Rate in **decimal** (×100 on chart for %); Policy rate in **decimal**.\n"
+    "- **Taylor** uses **inflation gap**: \\(\\pi_t - \\pi^*\\) when available."
 )
 
 # =========================
 # Helpers
 # =========================
 def ensure_decimal_rate(series: pd.Series) -> pd.Series:
+    """Return a decimal rate series; if values look like percents (e.g., 3.2), divide by 100."""
     s = pd.to_numeric(series, errors="coerce")
     if np.nanmedian(np.abs(s.values)) > 1.0:  # e.g., 3.2 means 3.2%
         return s / 100.0
@@ -114,7 +117,11 @@ class SimpleNK3EqBuiltIn:
 # =========================
 with st.sidebar:
     st.header("Model selection")
-    model_choice = st.selectbox("Choose model version", ["Original (DSGE.xlsx)", "Simple NK (built-in)"], index=0)
+    model_choice = st.selectbox(
+        "Choose model version",
+        ["Original (DSGE.xlsx)", "Levels (DSGE_Model2.xlsx)", "Simple NK (built-in)"],
+        index=0
+    )
 
     st.header("Simulation settings")
     T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
@@ -154,6 +161,32 @@ with st.sidebar:
             help=("• Add after smoothing: i_t = ρ i_{t-1} + (1−ρ) i*_t + ε_t^{pol}  "
                   "• Add to target: i_t = ρ i_{t-1} + (1−ρ)(i*_t + ε_t^{pol})  "
                   "• Force local jump: ensures tightening raises i_t vs i_{t-1} by at least the shock size.")
+        )
+
+    elif model_choice == "Levels (DSGE_Model2.xlsx)":
+        xlf2 = st.file_uploader("Upload DSGE_Model2.xlsx (optional)", type=["xlsx"], key="upload_levels")
+        fallback2 = Path(__file__).parent / "DSGE_Model2.xlsx"
+
+        rho_sim_lv = st.slider("Policy smoothing ρ (Taylor, levels)", 0.0, 0.95, 0.80, 0.05)
+
+        st.divider()
+        st.header("Shock (levels)")
+        shock_target_lv = st.selectbox(
+            "Apply shock to",
+            ["None", "IS (Output Gap)", "Phillips (Inflation Rate)", "Taylor (Policy tightening)", "Taylor (Policy easing)"],
+            index=0
+        )
+        is_shock_size_pp_lv = st.number_input("IS shock (Δ Output Gap, pp)", value=0.50, step=0.10, format="%.2f")
+        pc_shock_size_pp_lv = st.number_input("Phillips shock (Δ Inflation Rate, pp)", value=0.10, step=0.05, format="%.2f")
+        policy_shock_bp_abs_lv = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d")
+        shock_quarter_lv = st.slider("Shock timing (t)", 1, T-1, 1, 1)
+        shock_persist_lv = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05)
+
+        st.header("Policy shock behavior")
+        policy_mode_lv = st.radio(
+            "Choose how the policy shock is applied (levels)",
+            ["Add after smoothing (standard)", "Add to target (inside 1−ρ)", "Force local jump (override)"],
+            index=0
         )
 
     else:
@@ -415,6 +448,218 @@ def simulate_original(
     return g, p, i
 
 # =========================
+# LEVELS MODEL (DSGE_Model2.xlsx)
+# =========================
+@st.cache_data(show_spinner=True)
+def load_and_prepare_levels(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if file_like_or_path is None:
+        raise FileNotFoundError("Upload DSGE_Model2.xlsx or place it beside this script.")
+
+    if isinstance(file_like_or_path, (str, Path)):
+        p = Path(file_like_or_path)
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.exists():
+            raise FileNotFoundError(f"Could not find Excel file at: {p}")
+        excel_src = p
+    else:
+        excel_src = file_like_or_path
+
+    is_df = pd.read_excel(excel_src, sheet_name="IS Curve")
+    pc_df = pd.read_excel(excel_src, sheet_name="Phillips")
+    tr_df = pd.read_excel(excel_src, sheet_name="Taylor")
+
+    # Parse dates
+    for df in (is_df, pc_df, tr_df):
+        df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
+
+    # Normalize rate-like columns to decimals if necessary (levels model)
+    for col in ["Nominal Interest Rate", "Inflation Rate"]:
+        if col in is_df.columns:
+            is_df[col] = ensure_decimal_rate(is_df[col])
+        if col in pc_df.columns:
+            pc_df[col] = ensure_decimal_rate(pc_df[col])
+
+    if "Inflation Gap" in tr_df.columns:
+        tr_df["Inflation Gap"] = ensure_decimal_rate(tr_df["Inflation Gap"])
+    if "Nominal Interest Rate" in tr_df.columns:
+        tr_df["Nominal Interest Rate"] = ensure_decimal_rate(tr_df["Nominal Interest Rate"])
+
+    # Merge and sort
+    df = (
+        is_df.merge(pc_df, on="Date", how="inner", suffixes=("", "_PC"))
+             .merge(tr_df, on="Date", how="inner", suffixes=("", "_TR"))
+             .sort_values("Date")
+             .set_index("Date")
+    )
+
+    # Create lags and real rate (levels)
+    df["Output Gap_L1"] = df["Output Gap"].shift(1)
+    df["Inflation Rate_L1"] = df["Inflation Rate"].shift(1)
+    df["Nominal_Rate_L1"] = df["Nominal Interest Rate"].shift(1)
+
+    df["RR_L2_levels"] = (df["Nominal Interest Rate"] - df["Inflation Rate"]).shift(2)
+
+    # Aux lags used in Phillips
+    df["REER_L2"] = df["REER"].shift(2)
+    df["Energy_L1"] = df["Energy"].shift(1)
+    df["Non_Energy_L1"] = df["Non-Energy"].shift(1)
+    df["Foreign Demand_L1"] = df["Foreign Demand"].shift(1)
+
+    # Try to recover π* from Inflation Rate - Inflation Gap when both available
+    if "Inflation Gap" in df.columns and "Inflation Rate" in df.columns:
+        pi_target_series = df["Inflation Rate"] - df["Inflation Gap"]
+        df["PiTarget_Impl"] = pi_target_series
+
+    required_cols = [
+        "Output Gap", "Output Gap_L1", "RR_L2_levels",
+        "Foreign Demand_L1", "REER", "Energy", "Non-Energy",
+        "Inflation Rate", "Inflation Rate_L1",
+        "REER_L2", "Energy_L1", "Non_Energy_L1",
+        "Nominal Interest Rate", "Nominal_Rate_L1", "Inflation Gap"
+    ]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing required columns in DSGE_Model2.xlsx: {missing}")
+
+    df_est = df.dropna(subset=required_cols).copy()
+    if df_est.empty:
+        raise ValueError("No rows remain after dropping NA for required columns (levels).")
+
+    return df, df_est
+
+def fit_models_levels(df_est: pd.DataFrame):
+    # IS (levels): Output Gap_t on Output Gap_{t-1}, RR_{t-2}, and controls (levels)
+    X_is = sm.add_constant(df_est[[
+        "Output Gap_L1", "RR_L2_levels", "Foreign Demand_L1", "REER", "Energy", "Non-Energy"
+    ]])
+    y_is = df_est["Output Gap"]
+    model_is = sm.OLS(y_is, X_is).fit()
+
+    # Phillips (levels): Inflation Rate_t on Inflation Rate_{t-1}, Output Gap_{t-1}, REER_{t-2}, Energy_{t-1}, NonEnergy_{t-1}
+    X_pc = sm.add_constant(df_est[[
+        "Inflation Rate_L1", "Output Gap_L1", "REER_L2", "Energy_L1", "Non_Energy_L1"
+    ]])
+    y_pc = df_est["Inflation Rate"]
+    model_pc = sm.OLS(y_pc, X_pc).fit()
+
+    # Taylor (levels) with provided Inflation Gap
+    X_tr = sm.add_constant(pd.DataFrame({
+        "Nominal_Rate_L1": df_est["Nominal_Rate_L1"],
+        "Inflation_Gap": df_est["Inflation Gap"],
+        "Output_Gap": df_est["Output Gap"],
+    }))
+    y_tr = df_est["Nominal Interest Rate"]
+    model_tr = sm.OLS(y_tr, X_tr).fit()
+
+    # Convert partial-adjustment to target coefficients
+    b0 = float(model_tr.params["const"])
+    rhoh = min(float(model_tr.params["Nominal_Rate_L1"]), 0.99)
+    bpi = float(model_tr.params["Inflation_Gap"])
+    bg  = float(model_tr.params["Output_Gap"])
+
+    alpha_star = b0 / (1 - rhoh)
+    phi_pi_star = bpi / (1 - rhoh)
+    phi_x_star  = bg  / (1 - rhoh)
+
+    return {
+        "model_is": model_is, "model_pc": model_pc, "model_tr": model_tr,
+        "alpha_star": alpha_star, "phi_pi_star": phi_pi_star, "phi_x_star": phi_x_star,
+        "rho_hat": rhoh
+    }
+
+def build_shocks_levels(T, target, og_size_pp, pi_size_pp, policy_bp_abs, t0, rho):
+    """Shocks:
+       - Output gap & inflation shocks in **pp** (so divide by 100 to get decimals)
+       - Policy shock in **bp** (divide by 10,000)
+    """
+    is_arr = np.zeros(T); pc_arr = np.zeros(T); pol_arr = np.zeros(T)
+
+    if target == "IS (Output Gap)":
+        is_arr[t0] = og_size_pp / 100.0
+        for k in range(t0 + 1, T): is_arr[k] = rho * is_arr[k - 1]
+    elif target == "Phillips (Inflation Rate)":
+        pc_arr[t0] = pi_size_pp / 100.0
+        for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
+    elif target == "Taylor (Policy tightening)":
+        pol_arr[t0] =  (policy_bp_abs / 10000.0)
+        for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
+    elif target == "Taylor (Policy easing)":
+        pol_arr[t0] = -(policy_bp_abs / 10000.0)
+        for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
+
+    return is_arr, pc_arr, pol_arr
+
+def simulate_levels(
+    T: int, rho_sim: float, df_est: pd.DataFrame, models: Dict[str, sm.regression.linear_model.RegressionResultsWrapper],
+    means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float,
+    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)"
+):
+    """Levels simulation for (Output Gap, Inflation Rate, Nominal Rate)."""
+    g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
+
+    g[0] = float(df_est["Output Gap"].mean())
+    p[0] = float(df_est["Inflation Rate"].mean())
+    i[0] = i_mean_dec
+
+    model_is = models["model_is"]; model_pc = models["model_pc"]
+    alpha_star = models["alpha_star"]; phi_pi_star = models["phi_pi_star"]; phi_x_star = models["phi_x_star"]
+
+    if is_shock_arr is None: is_shock_arr = np.zeros(T)
+    if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
+    if policy_shock_arr is None: policy_shock_arr = np.zeros(T)
+
+    for t in range(1, T):
+        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
+
+        # IS (Output Gap)
+        Xis = pd.DataFrame([{
+            "const": 1.0,
+            "Output Gap_L1": g[t - 1],
+            "RR_L2_levels": rr_lag2,
+            "Foreign Demand_L1": means["Foreign Demand_L1"],
+            "REER": means["REER"],
+            "Energy": means["Energy"],
+            "Non-Energy": means["Non-Energy"],
+        }])
+        g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
+
+        # Phillips (Inflation Rate)
+        Xpc = pd.DataFrame([{
+            "const": 1.0,
+            "Inflation Rate_L1": p[t - 1],
+            "Output Gap_L1": g[t - 1],
+            "REER_L2": means["REER_L2"],
+            "Energy_L1": means["Energy_L1"],
+            "Non_Energy_L1": means["Non_Energy_L1"],
+        }])
+        p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
+
+        # Recover π* (constant) if available; otherwise 0 for consistency with gap variable
+        pi_target = means.get("PiTarget", 0.0)
+
+        # Taylor target with inflation gap coefficients recovered to target form
+        i_star = alpha_star + phi_pi_star * (p[t] - pi_target) + phi_x_star * g[t]
+
+        # Policy shock application
+        eps = policy_shock_arr[t]  # decimal
+
+        if policy_mode.startswith("Add after"):
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
+        elif policy_mode.startswith("Add to target"):
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + eps)
+        else:  # Force local jump
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
+            if eps > 0:
+                i_raw = max(i_raw, i[t - 1] + abs(eps))
+            elif eps < 0:
+                i_raw = min(i_raw, i[t - 1] - abs(eps))
+
+        i[t] = float(i_raw)
+
+    return g, p, i
+
+# =========================
 # Run selected model
 # =========================
 try:
@@ -565,6 +810,149 @@ try:
             st.write("**Phillips Curve**"); st.text(m_pc.summary().as_text())
             st.write("**Taylor Rule**"); st.text(m_tr.summary().as_text())
 
+    elif model_choice == "Levels (DSGE_Model2.xlsx)":
+        file_source2 = xlf2 if xlf2 is not None else (fallback2 if 'fallback2' in locals() else None)
+        df_all2, df_est2 = load_and_prepare_levels(file_source2)
+
+        models_lv = fit_models_levels(df_est2)
+
+        # Anchors & means for simulation (levels)
+        i_mean_dec_lv = float(df_est2["Nominal Interest Rate"].mean())
+        real_rate_mean_dec_lv = float(df_est2["RR_L2_levels"].mean())
+        means_lv = {
+            "Foreign Demand_L1": float(df_est2["Foreign Demand_L1"].mean()),
+            "REER": float(df_est2["REER"].mean()),
+            "Energy": float(df_est2["Energy"].mean()),
+            "Non-Energy": float(df_est2["Non-Energy"].mean()),
+            "REER_L2": float(df_est2["REER_L2"].mean()),
+            "Energy_L1": float(df_est2["Energy_L1"].mean()),
+            "Non_Energy_L1": float(df_est2["Non_Energy_L1"].mean()),
+            # If dataset included Inflation Gap = π - π*, we can infer π* as mean(π - gap)
+            "PiTarget": float((df_est2["Inflation Rate"] - df_est2["Inflation Gap"]).mean())
+                        if "Inflation Gap" in df_est2.columns else 0.0
+        }
+
+        # Build shocks (levels)
+        is_arr_lv, pc_arr_lv, pol_arr_lv = build_shocks_levels(
+            T, shock_target_lv, is_shock_size_pp_lv, pc_shock_size_pp_lv, policy_shock_bp_abs_lv,
+            shock_quarter_lv, shock_persist_lv
+        )
+
+        # Baseline vs Shock
+        g0, p0, i0 = simulate_levels(
+            T, rho_sim_lv, df_est2, models_lv, means_lv, i_mean_dec_lv, real_rate_mean_dec_lv,
+            policy_mode=policy_mode_lv
+        )
+        gS, pS, iS = simulate_levels(
+            T, rho_sim_lv, df_est2, models_lv, means_lv, i_mean_dec_lv, real_rate_mean_dec_lv,
+            is_shock_arr=is_arr_lv, pc_shock_arr=pc_arr_lv, policy_shock_arr=pol_arr_lv, policy_mode=policy_mode_lv
+        )
+
+        # Plot (Output Gap % and Inflation %; Policy rate decimal)
+        plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
+        quarters = np.arange(T)
+        vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
+
+        axes[0].plot(quarters, g0*100, label="Baseline", linewidth=2)
+        axes[0].plot(quarters, gS*100, label="Shock", linewidth=2)
+        axes[0].axvline(shock_quarter_lv, **vline_kwargs)
+        axes[0].set_title("Output Gap (%)")
+        axes[0].set_ylabel("%")
+        axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
+
+        axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
+        axes[1].plot(quarters, pS*100, label="Shock", linewidth=2)
+        axes[1].axvline(shock_quarter_lv, **vline_kwargs)
+        axes[1].set_title("Inflation Rate (%)")
+        axes[1].set_ylabel("%")
+        axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
+
+        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, iS, label="Shock", linewidth=2)
+        axes[2].axvline(shock_quarter_lv, **vline_kwargs)
+        axes[2].set_title("Nominal Policy Rate (decimal)")
+        axes[2].set_xlabel("Quarters ahead")
+        axes[2].set_ylabel("decimal")
+        axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
+
+        plt.tight_layout(); st.pyplot(fig)
+
+        # Readout at the shock quarter for policy
+        if shock_target_lv.startswith("Taylor"):
+            delta_i_bp = (iS - i0)[shock_quarter_lv] * 10000.0
+            st.info(f"Δ policy rate at t={shock_quarter_lv}: {delta_i_bp:.1f} bp  |  mode: {policy_mode_lv}  |  ρ={rho_sim_lv:.2f}")
+
+        # ===== LaTeX equations (levels) =====
+        st.subheader("Estimated Equations (Levels model)")
+        m_is2 = models_lv["model_is"]; m_pc2 = models_lv["model_pc"]; m_tr2 = models_lv["model_tr"]
+        alpha_star2 = models_lv["alpha_star"]; phi_pi_star2 = models_lv["phi_pi_star"]; phi_x_star2 = models_lv["phi_x_star"]
+        rho_hat2 = models_lv["rho_hat"]
+
+        # IS (levels)
+        c_is2 = float(m_is2.params["const"])
+        a1 = float(m_is2.params["Output Gap_L1"])
+        a2 = float(m_is2.params["RR_L2_levels"])
+        a3 = float(m_is2.params["Foreign Demand_L1"])
+        a4 = float(m_is2.params["REER"])
+        a5 = float(m_is2.params["Energy"])
+        a6 = float(m_is2.params["Non-Energy"])
+        st.markdown("**IS Curve (Output Gap, levels)**")
+        st.latex(
+            r"""
+            \begin{aligned}
+            x_t &= {c} \; {a1}\,x_{t-1} \; {a2}\,RR_{t-2} \; {a3}\,FD_{t-1}
+                 \; {a4}\,REER_t \; {a5}\,Energy_t \; {a6}\,NonEnergy_t \; + \varepsilon_t
+            \end{aligned}
+            """.replace("{c}", f"{c_is2:.3f}")
+             .replace("{a1}", fmt_coef(a1)).replace("{a2}", fmt_coef(a2))
+             .replace("{a3}", fmt_coef(a3)).replace("{a4}", fmt_coef(a4))
+             .replace("{a5}", fmt_coef(a5)).replace("{a6}", fmt_coef(a6))
+        )
+
+        # Phillips (levels)
+        c_pc2 = float(m_pc2.params["const"])
+        b1 = float(m_pc2.params["Inflation Rate_L1"])
+        b2 = float(m_pc2.params["Output Gap_L1"])
+        b3 = float(m_pc2.params["REER_L2"])
+        b4 = float(m_pc2.params["Energy_L1"])
+        b5 = float(m_pc2.params["Non_Energy_L1"])
+        st.markdown("**Phillips Curve (Inflation Rate, levels)**")
+        st.latex(
+            r"""
+            \begin{aligned}
+            \pi_t &= {c} \; {b1}\,\pi_{t-1} \; {b2}\,x_{t-1} \; {b3}\,REER_{t-2}
+                   \; {b4}\,Energy_{t-1} \; {b5}\,NonEnergy_{t-1} \; + u_t
+            \end{aligned}
+            """.replace("{c}", f"{c_pc2:.3f}")
+             .replace("{b1}", fmt_coef(b1)).replace("{b2}", fmt_coef(b2))
+             .replace("{b3}", fmt_coef(b3)).replace("{b4}", fmt_coef(b4))
+             .replace("{b5}", fmt_coef(b5))
+        )
+
+        # Taylor (levels, with inflation gap)
+        st.markdown("**Taylor Rule (partial adjustment, levels, with inflation gap)**")
+        if policy_mode_lv.startswith("Add after"):
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t")
+        elif policy_mode_lv.startswith("Add to target"):
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\,\big(i_t^\* + \varepsilon^{\text{pol}}_t\big)")
+        else:
+            st.latex(r"i_t \;=\; \rho\, i_{t-1} \;+\; (1-\rho)\, i_t^\* \;+\; \varepsilon^{\text{pol}}_t \quad (\text{with local-jump override})")
+        st.latex(r"i_t^\* \;=\; \alpha^\* \;+\; \phi_{\pi}^\*\,(\pi_t - \pi^\*) \;+\; \phi_{x}^\*\,x_t")
+        st.latex(
+            r"""
+            \rho = {rho}\,,\quad \alpha^\* = {a}\,,\quad \phi_{\pi}^\* = {fp}\,,\quad \phi_{x}^\* = {fx}
+            """.replace("{rho}", f"{rho_hat2:.3f}")
+             .replace("{a}", f"{alpha_star2:.3f}")
+             .replace("{fp}", f"{phi_pi_star2:.3f}")
+             .replace("{fx}", f"{phi_x_star2:.3f}")
+        )
+
+        with st.expander("Model diagnostics (OLS summaries, levels)"):
+            st.write("**IS Curve (levels)**"); st.text(m_is2.summary().as_text())
+            st.write("**Phillips Curve (levels)**"); st.text(m_pc2.summary().as_text())
+            st.write("**Taylor Rule (levels)**"); st.text(m_tr2.summary().as_text())
+
     else:
         # =========================
         # Simple NK (built-in)
@@ -640,7 +1028,4 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
-
-
-
 
