@@ -11,6 +11,7 @@
 #          • Force local jump (override)
 #      - LaTeX equations shown below charts (auto-updates to reflect selected vars)
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
+#      - NEW: "Snap-back (no persistence)" toggle for immediate return to zero
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -102,12 +103,14 @@ class SimpleNK3EqBuiltIn:
     def irf(self, shock: str = "demand", T: int = 24, size_pp: float = 1.0, t0: int = 0, rho_override: Optional[float] = None):
         """
         Generate impulse responses for output gap (x), inflation (pi), and rate (i)
-        to a chosen shock type with optional shock persistence.
+        to a chosen shock type with optional shock persistence override.
+        All variables are in **percentage points**.
         """
         p = self.p
         x = np.zeros(T); pi = np.zeros(T); i = np.zeros(T)
         r_nat = np.zeros(T); u = np.zeros(T); e_i = np.zeros(T)
 
+        # Initialize one-time shocks
         if shock == "demand":
             r_nat[t0] = size_pp
             rho_sh = rho_override if rho_override is not None else p.rho_r
@@ -121,17 +124,19 @@ class SimpleNK3EqBuiltIn:
             raise ValueError("shock must be 'demand','cost','policy'")
 
         for t in range(T):
+            # Propagate shock persistence (if any)
             if t > t0:
                 if shock == "demand":
-                    r_nat[t] += rho_sh * r_nat[t-1]
+                    r_nat[t] += (rho_sh or 0.0) * r_nat[t-1]
                 elif shock == "cost":
-                    u[t] += rho_sh * u[t-1]
+                    u[t] += (rho_sh or 0.0) * u[t-1]
 
             x_lag = x[t-1] if t>0 else 0.0
             pi_lag = pi[t-1] if t>0 else 0.0
             i_lag = i[t-1] if t>0 else 0.0
 
             # Solve contemporaneously for x_t given policy rule and Phillips
+            # Linearized system with partial-adjustment Taylor rule
             A_x = (1 - p.rho_i) * (p.phi_pi * p.kappa + p.phi_x) - p.kappa
             B_const = (
                 p.rho_i * i_lag
@@ -278,6 +283,13 @@ with st.sidebar:
         shock_persist_nk = st.slider(
             "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
             help="Decay rate of the shock each quarter."
+        )
+
+        # ---- Snap-back option (NEW) ----
+        snapback = st.checkbox(
+            "Snap-back (no persistence after the shock)",
+            value=True,
+            help="Sets ρx = γπ = ρi = 0 and forces the shock to be one-period (ρ_shock = 0)."
         )
 
 # =========================
@@ -636,8 +648,14 @@ try:
         # =========================
         # Simple NK (built-in)
         # =========================
-        P = NKParamsSimple(sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
-                           rho_i=rho_i, rho_x=rho_x, rho_r=rho_r, rho_u=rho_u, gamma_pi=gamma_pi)
+        # Apply snap-back (no persistence) if chosen
+        P = NKParamsSimple(
+            sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
+            rho_i=(0.0 if snapback else rho_i),
+            rho_x=(0.0 if snapback else rho_x),
+            rho_r=rho_r, rho_u=rho_u,
+            gamma_pi=(0.0 if snapback else gamma_pi)
+        )
         model = SimpleNK3EqBuiltIn(P)
         label_to_code = {"Demand (IS)": "demand", "Cost-push (Phillips)": "cost", "Policy (Taylor)": "policy"}
         code = label_to_code[shock_type_nk]
@@ -650,9 +668,11 @@ try:
                 r"$r_t^n$ = demand/natural-rate shock (pp),  "
                 r"$u_t$ = cost-push shock (pp).")
 
+        rho_for_shock = 0.0 if snapback else shock_persist_nk
+
         # Baseline (size 0) vs Shock
-        h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, shock_persist_nk)
-        h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, shock_persist_nk)
+        h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, rho_for_shock)
+        h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, rho_for_shock)
 
         # Plot IRFs (all in pp)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
@@ -699,6 +719,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
