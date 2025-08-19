@@ -295,11 +295,11 @@ with st.sidebar:
             index=0,
             help="Deviation: IRFs in percentage points around zero. Level: add a baseline rate and show %."
         )
-        neutral_rate_pct = st.number_input(
-            "Baseline (neutral) nominal policy rate — % annual",
-            value=4.00, step=0.25, format="%.2f",
-            help="Used only when showing Level (%). Example: 4.00 means a 4% neutral policy rate."
-        )
+    neutral_rate_pct = st.number_input(
+    "Baseline (neutral) nominal policy rate — % annual",
+    value=2.00, step=0.25, format="%.2f",
+    help="Use 2.00 for Bank of Canada's target neutral rate."
+)
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -725,6 +725,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
