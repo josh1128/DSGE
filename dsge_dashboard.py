@@ -905,9 +905,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
- as e:
-    st.error(f"Problem loading or running the selected model: {e}")
-    st.stop()
+
 
 
 
