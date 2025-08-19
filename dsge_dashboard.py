@@ -10,13 +10,13 @@
 #          • Add to target (inside 1−ρ)
 #          • Force local jump (override)
 #      - LaTeX equations shown below charts (auto-updates to reflect selected vars)
-#      - NEW: Forecast tables (baseline vs shock + deltas) and CSV download
+#      - NEW: Forecast section with graphs + table + CSV
 #      - NEW: Date x-axis for forecasts (post-sample quarters)
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 #      - "Snap-back (no persistence)" option makes x_t & π_t one-period while
 #        KEEPING policy smoothing ρ_i so i_t decays geometrically.
 #      - Toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
-#      - NEW: Forecast table + CSV download
+#      - NEW: Forecast section with graphs + table + CSV
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -84,6 +84,18 @@ def make_forecast_quarter_axis_from_df(df_index: pd.Index, T: int) -> pd.Datetim
     last_date = pd.to_datetime(df_index.max())
     start_q = pd.Period(last_date, freq="Q")
     return pd.period_range(start_q + 1, periods=T, freq="Q").to_timestamp()
+
+def safe_sheet_name(xls, wanted_name: str) -> str:
+    """Return the actual sheet name in file that matches wanted_name ignoring case/extra spaces."""
+    w = wanted_name.strip().lower()
+    for s in xls.sheet_names:
+        if s.strip().lower() == w:
+            return s
+    # fallback: substring match (e.g., 'phillips' finds 'phillips curve')
+    for s in xls.sheet_names:
+        if w in s.strip().lower():
+            return s
+    raise KeyError(f"Sheet like '{wanted_name}' not found. Sheets present: {xls.sheet_names}")
 
 # =========================
 # Simple NK (built-in)
@@ -329,12 +341,13 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
     else:
         excel_src = file_like_or_path
 
-    is_df = pd.read_excel(excel_src, sheet_name="IS Curve")
-    pc_df = pd.read_excel(excel_src, sheet_name="Phillips")  # <-- adjust if your sheet is "Phillips Curve"
-    tr_df = pd.read_excel(excel_src, sheet_name="Taylor")
+    xls = pd.ExcelFile(excel_src)
+    is_df = pd.read_excel(xls, sheet_name=safe_sheet_name(xls, "IS Curve"))
+    pc_df = pd.read_excel(xls, sheet_name=safe_sheet_name(xls, "Phillips Curve"))  # tolerant to naming
+    tr_df = pd.read_excel(xls, sheet_name=safe_sheet_name(xls, "Taylor"))
 
     for df in (is_df, pc_df, tr_df):
-        df["Date"] = pd.to_datetime(df["Date"], format="%Y-%m", errors="raise")
+        df["Date"] = pd.to_datetime(df["Date"], errors="raise")
 
     df = (
         is_df.merge(pc_df, on="Date", how="inner")
@@ -583,9 +596,60 @@ try:
 
         plt.tight_layout(); st.pyplot(fig)
 
-        # ---------- New: Forecast table + CSV (Original) ----------
+        # ---------- NEW: Forecasted values — GRAPHS ----------
+        st.subheader("Forecasted values — graphs (Original model)")
+        colA, colB = st.columns(2)
+        with colA:
+            fig_o1, ax_o1 = plt.subplots(figsize=(6, 4))
+            ax_o1.plot(date_axis, g0*100, label="GDP growth — baseline", linewidth=2)
+            ax_o1.plot(date_axis, gS*100, label="GDP growth — shock", linewidth=2)
+            ax_o1.axvline(date_axis[shock_quarter], **vline_kwargs)
+            ax_o1.set_title("GDP growth forecast (%)"); ax_o1.set_ylabel("%"); ax_o1.grid(True, alpha=0.3); ax_o1.legend()
+            st.pyplot(fig_o1)
+
+            fig_o3, ax_o3 = plt.subplots(figsize=(6, 4))
+            ax_o3.plot(date_axis, i0*100, label="Policy rate — baseline", linewidth=2)
+            ax_o3.plot(date_axis, iS*100, label="Policy rate — shock", linewidth=2)
+            ax_o3.axvline(date_axis[shock_quarter], **vline_kwargs)
+            ax_o3.set_title("Policy rate forecast (%, annualized approx)"); ax_o3.set_ylabel("%"); ax_o3.grid(True, alpha=0.3); ax_o3.legend()
+            st.pyplot(fig_o3)
+
+        with colB:
+            fig_o2, ax_o2 = plt.subplots(figsize=(6, 4))
+            ax_o2.plot(date_axis, p0*100, label="Inflation — baseline", linewidth=2)
+            ax_o2.plot(date_axis, pS*100, label="Inflation — shock", linewidth=2)
+            ax_o2.axvline(date_axis[shock_quarter], **vline_kwargs)
+            ax_o2.set_title("Inflation forecast (%)"); ax_o2.set_ylabel("%"); ax_o2.grid(True, alpha=0.3); ax_o2.legend()
+            st.pyplot(fig_o2)
+
+        show_delta_plots_o = st.checkbox("Show Δ (shock − baseline) mini-charts — Original", value=True)
+        if show_delta_plots_o:
+            colD1, colD2, colD3 = st.columns(3)
+            dg = (gS - g0) * 100.0
+            dpi = (pS - p0) * 100.0
+            di_bp = (iS - i0) * 10000.0
+            with colD1:
+                fig_d1, ax_d1 = plt.subplots(figsize=(4.8, 3.2))
+                ax_d1.plot(date_axis, dg, linewidth=2)
+                ax_d1.axhline(0, color="black", linewidth=1)
+                ax_d1.set_title("Δ GDP growth (pp)"); ax_d1.grid(True, alpha=0.3)
+                st.pyplot(fig_d1)
+            with colD2:
+                fig_d2, ax_d2 = plt.subplots(figsize=(4.8, 3.2))
+                ax_d2.plot(date_axis, dpi, linewidth=2)
+                ax_d2.axhline(0, color="black", linewidth=1)
+                ax_d2.set_title("Δ Inflation (pp)"); ax_d2.grid(True, alpha=0.3)
+                st.pyplot(fig_d2)
+            with colD3:
+                fig_d3, ax_d3 = plt.subplots(figsize=(4.8, 3.2))
+                ax_d3.plot(date_axis, di_bp, linewidth=2)
+                ax_d3.axhline(0, color="black", linewidth=1)
+                ax_d3.set_title("Δ Policy rate (bp)"); ax_d3.grid(True, alpha=0.3)
+                st.pyplot(fig_d3)
+
+        # ---------- Forecast table + CSV (Original) ----------
         st.subheader("Forecast table — Original model")
-        show_deltas_o = st.checkbox("Show Δ (shock − baseline)", value=True, key="show_deltas_original")
+        show_deltas_o = st.checkbox("Show Δ (shock − baseline) table columns — Original", value=True, key="show_deltas_original")
 
         df_fore_o = pd.DataFrame({
             "Date": date_axis,
@@ -716,7 +780,6 @@ try:
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
 
-        # For NK we keep a simple sequential axis for charts; tables below use dates
         axes[0].plot(h, x0, linewidth=2, label="Baseline")
         axes[0].plot(h, xS, linewidth=2, label="Shock")
         axes[0].axvline(t0, **vline_kwargs); axes[0].set_title("Output Gap (x_t, pp)"); axes[0].set_ylabel("pp")
@@ -736,9 +799,58 @@ try:
 
         plt.tight_layout(); st.pyplot(fig)
 
-        # ---------- New: Forecast table + CSV (Simple NK) ----------
-        st.subheader("Forecast table — Simple NK")
+        # ---------- NEW: Forecasted values — GRAPHS (NK) ----------
+        st.subheader("Forecasted values — graphs (Simple NK)")
         nk_date_axis = pd.period_range(pd.Period(pd.Timestamp.today(), freq="Q") + 1, periods=T, freq="Q").to_timestamp()
+
+        colA, colB = st.columns(2)
+        with colA:
+            fig_k1, ax_k1 = plt.subplots(figsize=(6, 4))
+            ax_k1.plot(nk_date_axis, x0, label="Output gap — baseline", linewidth=2)
+            ax_k1.plot(nk_date_axis, xS, label="Output gap — shock", linewidth=2)
+            ax_k1.set_title("Output gap forecast (pp)"); ax_k1.set_ylabel("pp"); ax_k1.grid(True, alpha=0.3); ax_k1.legend()
+            st.pyplot(fig_k1)
+
+            fig_k3, ax_k3 = plt.subplots(figsize=(6, 4))
+            ax_k3.plot(nk_date_axis, i0_plot, label="Policy rate — baseline", linewidth=2)
+            ax_k3.plot(nk_date_axis, iS_plot, label="Policy rate — shock", linewidth=2)
+            ax_k3.set_title("Policy rate forecast"); ax_k3.set_ylabel(("%" if units_mode=="Level (% annual)" else "pp")); ax_k3.grid(True, alpha=0.3); ax_k3.legend()
+            st.pyplot(fig_k3)
+
+        with colB:
+            fig_k2, ax_k2 = plt.subplots(figsize=(6, 4))
+            ax_k2.plot(nk_date_axis, pi0, label="Inflation — baseline", linewidth=2)
+            ax_k2.plot(nk_date_axis, piS, label="Inflation — shock", linewidth=2)
+            ax_k2.set_title("Inflation forecast (pp)"); ax_k2.set_ylabel("pp"); ax_k2.grid(True, alpha=0.3); ax_k2.legend()
+            st.pyplot(fig_k2)
+
+        show_delta_plots_k = st.checkbox("Show Δ (shock − baseline) mini-charts — Simple NK", value=True)
+        if show_delta_plots_k:
+            colKD1, colKD2, colKD3 = st.columns(3)
+            dx = (xS - x0)
+            dpi = (piS - pi0)
+            di = (iS_plot - i0_plot)  # in the same units as selected for display
+            with colKD1:
+                fig_kd1, ax_kd1 = plt.subplots(figsize=(4.8, 3.2))
+                ax_kd1.plot(nk_date_axis, dx, linewidth=2)
+                ax_kd1.axhline(0, color="black", linewidth=1)
+                ax_kd1.set_title("Δ Output gap (pp)"); ax_kd1.grid(True, alpha=0.3)
+                st.pyplot(fig_kd1)
+            with colKD2:
+                fig_kd2, ax_kd2 = plt.subplots(figsize=(4.8, 3.2))
+                ax_kd2.plot(nk_date_axis, dpi, linewidth=2)
+                ax_kd2.axhline(0, color="black", linewidth=1)
+                ax_kd2.set_title("Δ Inflation (pp)"); ax_kd2.grid(True, alpha=0.3)
+                st.pyplot(fig_kd2)
+            with colKD3:
+                fig_kd3, ax_kd3 = plt.subplots(figsize=(4.8, 3.2))
+                ax_kd3.plot(nk_date_axis, di, linewidth=2)
+                ax_kd3.axhline(0, color="black", linewidth=1)
+                ax_kd3.set_title("Δ Policy rate"); ax_kd3.grid(True, alpha=0.3)
+                st.pyplot(fig_kd3)
+
+        # ---------- Forecast table + CSV (Simple NK) ----------
+        st.subheader("Forecast table — Simple NK")
 
         if units_mode == "Level (% annual)":
             i_label_base = "Policy rate (% level, baseline)"
@@ -761,7 +873,7 @@ try:
             i_label_shck: i_shck_vals,
         })
 
-        show_deltas_nk = st.checkbox("Show Δ (shock − baseline)", value=True, key="show_deltas_nk")
+        show_deltas_nk = st.checkbox("Show Δ (shock − baseline) table columns — Simple NK", value=True, key="show_deltas_nk")
         if show_deltas_nk:
             df_fore_nk["Δ Output gap (pp)"] = df_fore_nk["Output gap (pp, shock)"] - df_fore_nk["Output gap (pp, baseline)"]
             df_fore_nk["Δ Inflation (pp)"]  = df_fore_nk["Inflation (pp, shock)"]  - df_fore_nk["Inflation (pp, baseline)"]
@@ -793,6 +905,10 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+ as e:
+    st.error(f"Problem loading or running the selected model: {e}")
+    st.stop()
+
 
 
 
