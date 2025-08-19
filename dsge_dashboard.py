@@ -11,8 +11,9 @@
 #          • Force local jump (override)
 #      - LaTeX equations shown below charts (auto-updates to reflect selected vars)
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
-#      - NEW: "Snap-back (no persistence)" option makes x_t & π_t one-period
-#        while KEEPING policy smoothing ρ_i so i_t decays geometrically.
+#      - "Snap-back (no persistence)" option makes x_t & π_t one-period while
+#        KEEPING policy smoothing ρ_i so i_t decays geometrically.
+#      - NEW: toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -52,10 +53,7 @@ def fmt_coef(x: float, nd: int = 3) -> str:
     return f"+{s}" if x >= 0 else s
 
 def build_latex_equation(const_val: float, terms: List[tuple], lhs: str, eps_symbol: str) -> str:
-    """
-    Build a LaTeX aligned equation string.
-    terms: list of tuples (coef_value, pretty_symbol)
-    """
+    """Build a LaTeX aligned equation string."""
     if not terms:
         rhs_terms = ""
     else:
@@ -68,10 +66,7 @@ def build_latex_equation(const_val: float, terms: List[tuple], lhs: str, eps_sym
     return eq
 
 def row_from_params(params_index: pd.Index, values: Dict[str, float]) -> pd.DataFrame:
-    """
-    Create a 1-row DataFrame for prediction with columns ordered like model.params.index.
-    Missing regressors default to 0, 'const' is set to 1.
-    """
+    """Create a 1-row DataFrame for prediction with columns ordered like model.params.index."""
     cols = list(params_index)
     row = {}
     for c in cols:
@@ -105,7 +100,7 @@ class SimpleNK3EqBuiltIn:
         """
         Generate impulse responses for output gap (x), inflation (pi), and rate (i)
         to a chosen shock type with optional shock persistence override.
-        All variables are in **percentage points**.
+        All variables are in **percentage points** (pp) deviations from baseline.
         """
         p = self.p
         x = np.zeros(T); pi = np.zeros(T); i = np.zeros(T)
@@ -137,7 +132,6 @@ class SimpleNK3EqBuiltIn:
             i_lag = i[t-1] if t>0 else 0.0
 
             # Solve contemporaneously for x_t given policy rule and Phillips
-            # Linearized system with partial-adjustment Taylor rule
             A_x = (1 - p.rho_i) * (p.phi_pi * p.kappa + p.phi_x) - p.kappa
             B_const = (
                 p.rho_i * i_lag
@@ -275,7 +269,7 @@ with st.sidebar:
         )
         shock_size_pp_nk = st.number_input(
             "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
-            help="Magnitude of the initial shock (pp)."
+            help="Magnitude of the initial shock (pp). Use negative for easing."
         )
         shock_quarter_nk = st.slider(
             "Shock timing t (quarter index)", 1, T-1, 1, 1,
@@ -286,12 +280,25 @@ with st.sidebar:
             help="Decay rate of the shock each quarter."
         )
 
-        # ---- Snap-back option (NEW) ----
+        # ---- Snap-back option ----
         snapback = st.checkbox(
             "Snap-back (no persistence after the shock)",
             value=True,
             help="Sets ρx = γπ = 0 and forces the shock to be one-period (ρ_shock = 0). "
                  "Policy smoothing ρi is kept so i_t decays geometrically."
+        )
+
+        # ---- Display option for policy rate UNITS (NEW) ----
+        units_mode = st.radio(
+            "Policy rate units",
+            ["Deviation (pp)", "Level (% annual)"],
+            index=0,
+            help="Deviation: IRFs in percentage points around zero. Level: add a baseline rate and show %."
+        )
+        neutral_rate_pct = st.number_input(
+            "Baseline (neutral) nominal policy rate — % annual",
+            value=4.00, step=0.25, format="%.2f",
+            help="Used only when showing Level (%). Example: 4.00 means a 4% neutral policy rate."
         )
 
 # =========================
@@ -356,10 +363,7 @@ def fit_models_original(
     pc_selected: List[str],
     tr_selected: List[str],
 ):
-    """
-    Fit OLS for IS, Phillips, and Taylor (with inflation gap).
-    Also compute α*, φπ*, φg* from the partial-adjustment Taylor rule parameters.
-    """
+    """Fit OLS for IS, Phillips, and Taylor (with inflation gap)."""
     # IS
     if not is_selected:
         raise ValueError("Select at least one regressor for IS (besides constant).")
@@ -374,7 +378,7 @@ def fit_models_original(
     y_pc = df_est["Dlog_CPI"]
     model_pc = sm.OLS(y_pc, X_pc).fit()
 
-    # Taylor with inflation gap (only include selected)
+    # Taylor with inflation gap
     infl_gap_full = df_est["Dlog_CPI"] - pi_star_quarterly
     df_tr = pd.DataFrame(index=df_est.index)
     if "Nominal_Rate_L1" in tr_selected:
@@ -392,16 +396,16 @@ def fit_models_original(
     # Convert partial-adjustment rule to star-form only if the needed params exist
     b0 = float(model_tr.params.get("const", 0.0))
     rhoh = float(model_tr.params.get("Nominal_Rate_L1", 0.0))
-    rhoh = min(max(rhoh, 0.0), 0.99)  # keep sane for display
+    rhoh = min(max(rhoh, 0.0), 0.99)
 
     def safe_div(num, den):
         return num / den if abs(den) > 1e-8 else np.nan
 
     alpha_star = safe_div(b0, (1 - rhoh))
     bpi = float(model_tr.params.get("Inflation_Gap", 0.0))
-    bg = float(model_tr.params.get("DlogGDP", 0.0))
+    bg  = float(model_tr.params.get("DlogGDP", 0.0))
     phi_pi_star = safe_div(bpi, (1 - rhoh)) if "Inflation_Gap" in model_tr.params.index else np.nan
-    phi_g_star = safe_div(bg, (1 - rhoh)) if "DlogGDP" in model_tr.params.index else np.nan
+    phi_g_star  = safe_div(bg,  (1 - rhoh)) if "DlogGDP" in model_tr.params.index else np.nan
 
     return {
         "model_is": model_is, "model_pc": model_pc, "model_tr": model_tr,
@@ -433,10 +437,7 @@ def simulate_original(
     means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float, pi_star_quarterly: float,
     is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)"
 ):
-    """
-    Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models.
-    Applies the chosen policy shock mode and policy smoothing ρ each step.
-    """
+    """Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models."""
     g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
 
     g[0] = float(df_est["DlogGDP"].mean())
@@ -453,7 +454,6 @@ def simulate_original(
     for t in range(1, T):
         rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
 
-        # --- IS predict row (only selected regressors) ---
         vals_is = {
             "DlogGDP_L1": g[t - 1],
             "Real_Rate_L2_data": rr_lag2,
@@ -465,7 +465,6 @@ def simulate_original(
         Xis = row_from_params(model_is.params.index, vals_is)
         g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
 
-        # --- Phillips predict row ---
         vals_pc = {
             "Dlog_CPI_L1": p[t - 1],
             "DlogGDP_L1": g[t - 1],
@@ -476,28 +475,22 @@ def simulate_original(
         Xpc = row_from_params(model_pc.params.index, vals_pc)
         p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
-        # --- Taylor target with inflation gap (only use selected) ---
         pi_gap_t = p[t] - pi_star_quarterly
         if not np.isnan(alpha_star) and (("Inflation_Gap" in model_tr.params.index) or ("DlogGDP" in model_tr.params.index)):
             i_star = (alpha_star
                       + (0.0 if np.isnan(phi_pi_star) else phi_pi_star) * pi_gap_t
                       + (0.0 if np.isnan(phi_g_star) else phi_g_star) * g[t])
         else:
-            vals_tr = {
-                "Nominal_Rate_L1": 0.0,
-                "Inflation_Gap": pi_gap_t,
-                "DlogGDP": g[t],
-            }
+            vals_tr = {"Nominal_Rate_L1": 0.0, "Inflation_Gap": pi_gap_t, "DlogGDP": g[t]}
             Xtr_star = row_from_params(model_tr.params.index, vals_tr)
             i_star = float(model_tr.predict(Xtr_star).iloc[0])
 
-        # --- Apply policy shock according to chosen mode with smoothing on i ---
         eps = policy_shock_arr[t]  # decimal (e.g., 0.0025 = 25 bp)
         if policy_mode.startswith("Add after"):
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
         elif policy_mode.startswith("Add to target"):
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + eps)
-        else:  # Force local jump (override)
+        else:
             i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
             if eps > 0:
                 i_raw = max(i_raw, i[t - 1] + abs(eps))
@@ -677,7 +670,16 @@ try:
         h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, rho_for_shock)
         h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, rho_for_shock)
 
-        # Plot IRFs (all in pp)
+        # ---- Prepare policy series for plotting in chosen units ----
+        i0_plot, iS_plot = i0.copy(), iS.copy()
+        i_ylabel = "pp"
+        if units_mode == "Level (% annual)":
+            # i0 and iS are deviations in pp; add a baseline level (neutral_rate_pct) to show %
+            i0_plot = neutral_rate_pct + i0_plot
+            iS_plot = neutral_rate_pct + iS_plot
+            i_ylabel = "%"
+
+        # Plot IRFs (x, π in pp; i either pp or % depending on selection)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
@@ -692,10 +694,11 @@ try:
         axes[1].axvline(t0, **vline_kwargs); axes[1].set_title("Inflation (π_t, pp)"); axes[1].set_ylabel("pp")
         axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
-        axes[2].plot(h, i0, linewidth=2, label="Baseline")
-        axes[2].plot(h, iS, linewidth=2, label="Shock")
-        axes[2].axvline(t0, **vline_kwargs); axes[2].set_title("Nominal Policy Rate (i_t, pp)")
-        axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("pp")
+        axes[2].plot(h, i0_plot, linewidth=2, label="Baseline")
+        axes[2].plot(h, iS_plot, linewidth=2, label="Shock")
+        axes[2].axvline(t0, **vline_kwargs)
+        axes[2].set_title("Nominal Policy Rate (i_t)")
+        axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel(i_ylabel)
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
 
         plt.tight_layout(); st.pyplot(fig)
@@ -710,7 +713,7 @@ try:
                 r"""
 - **$x_t$** — Output gap (percentage points, pp)  
 - **$\pi_t$** — Inflation (pp)  
-- **$i_t$** — Nominal policy rate (pp)  
+- **$i_t$** — Nominal policy rate (pp deviations; or % level when selected)  
 - **$r_t^n$** — Demand / natural-rate shock (pp)  
 - **$u_t$** — Cost-push shock (pp)  
 - **$\sigma$,\,$\rho_x$,\,$\rho_r$** — IS dynamics  
