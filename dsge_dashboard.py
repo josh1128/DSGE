@@ -11,7 +11,8 @@
 #          • Force local jump (override)
 #      - LaTeX equations shown below charts (auto-updates to reflect selected vars)
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
-#      - NEW: "Snap-back (no persistence)" toggle for immediate return to zero
+#      - NEW: "Snap-back (no persistence)" option makes x_t & π_t one-period
+#        while KEEPING policy smoothing ρ_i so i_t decays geometrically.
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -289,7 +290,8 @@ with st.sidebar:
         snapback = st.checkbox(
             "Snap-back (no persistence after the shock)",
             value=True,
-            help="Sets ρx = γπ = ρi = 0 and forces the shock to be one-period (ρ_shock = 0)."
+            help="Sets ρx = γπ = 0 and forces the shock to be one-period (ρ_shock = 0). "
+                 "Policy smoothing ρi is kept so i_t decays geometrically."
         )
 
 # =========================
@@ -648,13 +650,14 @@ try:
         # =========================
         # Simple NK (built-in)
         # =========================
-        # Apply snap-back (no persistence) if chosen
+        # Apply snap-back: x and π have no inertia, shock is one-period.
+        # Keep policy smoothing ρ_i to get a geometric decay in i_t.
         P = NKParamsSimple(
             sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
-            rho_i=(0.0 if snapback else rho_i),
-            rho_x=(0.0 if snapback else rho_x),
+            rho_i=rho_i,                         # KEEP smoothing for the decaying path
+            rho_x=(0.0 if snapback else rho_x),  # kill output inertia if snap-back
             rho_r=rho_r, rho_u=rho_u,
-            gamma_pi=(0.0 if snapback else gamma_pi)
+            gamma_pi=(0.0 if snapback else gamma_pi)  # kill inflation inertia if snap-back
         )
         model = SimpleNK3EqBuiltIn(P)
         label_to_code = {"Demand (IS)": "demand", "Cost-push (Phillips)": "cost", "Policy (Taylor)": "policy"}
@@ -719,6 +722,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
