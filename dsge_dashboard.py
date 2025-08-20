@@ -169,7 +169,7 @@ with st.sidebar:
     # -------- Persistent Notes UI --------
     st.header("🗒️ User Notes")
     _existing_notes = load_saved_notes()
-    user_notes = st.text_area("Write your notes here:", value=_existing_notes, height=300, key="notes_textarea")
+    user_notes = st.text_area("Write your notes here:", value=_existing_notes, height=150, key="notes_textarea")
 
     colN1, colN2, colN3 = st.columns([1,1,1])
     with colN1:
@@ -764,6 +764,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
