@@ -5,6 +5,9 @@
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 #   3) New Keynesian (DSGE_Model2.xlsx): Output Gap, Inflation Rate, Nominal Interest Rate
 #
+# NEW: Toggle to show the Taylor-policy rate in **deviation (pp)** or **actual level (% annual)**
+#      for both the Original and NK blocks. Simple NK already had this toggle.
+#
 # NOTES for Model 3 (NK file with spaces in column names):
 #   Sheets / columns used:
 #     • IS Curve:      Date, Output Gap, Nominal Interest Rate, Inflation Rate
@@ -67,7 +70,7 @@ def row_from_params(params_index: pd.Index, values: Dict[str, float]) -> pd.Data
     return pd.DataFrame([row], columns=cols)
 
 # =========================
-# Simple NK (built-in) — unchanged
+# Simple NK (built-in) — unchanged except for existing units toggle
 # =========================
 @dataclass
 class NKParamsSimple:
@@ -142,14 +145,14 @@ with st.sidebar:
     st.header("Simulation horizon")
     T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
 
-    # ===== Generic neutral rate for display (used by built-in NK)
+    # ===== Generic neutral rate for display (used by built-in NK plotting only)
     neutral_rate_pct = st.number_input(
         "Baseline neutral policy rate — % annual (display)",
         value=2.00, step=0.25, format="%.2f"
     )
 
 # =========================
-# ORIGINAL MODEL (unchanged parts kept)
+# ORIGINAL MODEL (unchanged estimation; NEW units toggle for Taylor plotting)
 # =========================
 @st.cache_data(show_spinner=True)
 def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -179,12 +182,11 @@ def load_and_prepare_original(file_like_or_path) -> Tuple[pd.DataFrame, pd.DataF
              .set_index("Date")
     )
 
-    # These columns are from your original workflow (kept for model 1 only)
     # If present, convert nominal rate to decimal
     if "Nominal Rate" in df.columns:
         df["Nominal Rate"] = ensure_decimal_rate(df["Nominal Rate"])
 
-    # The original model expected these engineered fields:
+    # Engineered fields used by Original model
     if all(c in df.columns for c in ["DlogGDP","Dlog_CPI"]):
         df["DlogGDP_L1"] = df["DlogGDP"].shift(1)
         df["Dlog_CPI_L1"] = df["Dlog_CPI"].shift(1)
@@ -313,7 +315,6 @@ def simulate_original(
             i_star = float(model_tr.predict(Xtr_star).iloc[0])
 
         eps = policy_shock_arr[t]
-        # Default: standard add-after-smoothing
         i[t] = float(rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps)
 
     return g, p, i
@@ -460,7 +461,6 @@ def simulate_nk(
     y[0] = y0; pi[0] = pi0; i[0] = i0
 
     m_is = models["is"]; m_pc = models["pc"]; m_tr = models["tr"]
-    rho_hat = models["rho_hat"]
 
     for t in range(1, T):
         # --- IS: y_t = c + a*y_{t-1} + b*RealRate_{t-1}
@@ -472,14 +472,13 @@ def simulate_nk(
         Xpc = row_from_params(m_pc.params.index, {"Inflation Rate L1": pi[t-1], "Output Gap L1": y[t-1]})
         pi[t] = float(m_pc.predict(Xpc).iloc[0])
 
-        # --- Taylor: i_t = c + ψπ*(π_t-π*) + ψy*y_t [+ ρ*i_{t-1}]
-        tr_vals = {"Inflation Gap": (pi[t] - 0.0),  # Inflation Gap column already embodies π* in training; we use π gap ~ π here (π*≈0 baseline in deviations)
+        # --- Taylor: i_t = c + ψπ*(π_t-π*) + ψy*y_t [+ ρ*i_{t-1} if included at fit time]
+        tr_vals = {"Inflation Gap": (pi[t] - 0.0),  # gap variable was used at estimation
                    "Output Gap": y[t]}
-        if include_policy_smoothing:
+        if "Nominal Rate L1" in m_tr.params.index:
             tr_vals["Nominal Rate L1"] = i[t-1]
         Xtr = row_from_params(m_tr.params.index, tr_vals)
-        i_t_pred = float(m_tr.predict(Xtr).iloc[0])
-        i[t] = i_t_pred
+        i[t] = float(m_tr.predict(Xtr).iloc[0])
 
         # --- Inject one-time shock at shock_time
         if t == shock_time:
@@ -490,9 +489,7 @@ def simulate_nk(
             elif shock_block == "Taylor":
                 i[t] += shock_size
 
-        # --- If smoothing was estimated in the regression, it's already embedded via Nominal Rate L1
-
-    return y, pi, i, rho_hat
+    return y, pi, i
 
 # =========================
 # Run selected model
@@ -587,6 +584,32 @@ try:
             is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr
         )
 
+        # === NEW: Taylor units toggle for Original
+        with st.sidebar:
+            st.divider()
+            st.header("Taylor rate units (Original)")
+            # compute a neutral from sample mean
+            neutral_original_pct = float(i_mean_dec * 100.0)
+            units_mode_original = st.radio(
+                "Display as",
+                ["Deviation (pp)", "Level (% annual)"],
+                index=1,
+                key="units_original"
+            )
+            st.caption(f"Neutral (sample mean): {neutral_original_pct:.2f}%")
+
+        # Prepare plotting series according to units toggle
+        if units_mode_original == "Deviation (pp)":
+            i0_plot = (i0 - i_mean_dec) * 100.0
+            iS_plot = (iS - i_mean_dec) * 100.0
+            i_ylabel = "pp"
+            i_title = "Policy Rate — deviation from neutral (pp)"
+        else:
+            i0_plot = i0 * 100.0
+            iS_plot = iS * 100.0
+            i_ylabel = "%"
+            i_title = "Nominal Policy Rate (% annual)"
+
         # Plot
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
@@ -597,15 +620,13 @@ try:
         axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
         axes[1].plot(quarters, pS*100, label="Shock", linewidth=2)
         axes[1].set_title("Inflation (DlogCPI, %)"); axes[1].set_ylabel("%"); axes[1].grid(True, alpha=0.3); axes[1].legend()
-        axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
-        axes[2].plot(quarters, iS, label="Shock", linewidth=2)
-        axes[2].set_title("Nominal Policy Rate (decimal)"); axes[2].set_xlabel("Quarters"); axes[2].grid(True, alpha=0.3); axes[2].legend()
+        axes[2].plot(quarters, i0_plot, label="Baseline", linewidth=2)
+        axes[2].plot(quarters, iS_plot, label="Shock", linewidth=2)
+        axes[2].set_title(i_title); axes[2].set_xlabel("Quarters"); axes[2].set_ylabel(i_ylabel); axes[2].grid(True, alpha=0.3); axes[2].legend()
         plt.tight_layout(); st.pyplot(fig)
 
         st.subheader("Estimated Equations (Original)")
         m_is = models_o["model_is"]; m_pc = models_o["model_pc"]; m_tr = models_o["model_tr"]
-        rho_hat = models_o["rho_hat"]; alpha_star = models_o["alpha_star"]; phi_pi_star = models_o["phi_pi_star"]; phi_g_star = models_o["phi_g_star"]
-        # (LaTeX render kept from previous version for brevity)
         with st.expander("OLS summaries"):
             st.write("**IS Curve**"); st.text(m_is.summary().as_text())
             st.write("**Phillips Curve**"); st.text(m_pc.summary().as_text())
@@ -630,7 +651,7 @@ try:
             shock_quarter_nk = st.slider("Shock timing t", 1, T-1, 1, 1)
             shock_persist_nk = st.slider("Shock persistence ρ_shock", 0.0, 0.98, 0.80, 0.02)
             snapback = st.checkbox("Snap-back (no persistence for x,π)", value=True)
-            units_mode = st.radio("Policy rate units", ["Deviation (pp)", "Level (% annual)"], index=0)
+            units_mode = st.radio("Policy rate units (Simple NK)", ["Deviation (pp)", "Level (% annual)"], index=0)
 
         P = NKParamsSimple(
             sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
@@ -682,25 +703,50 @@ try:
 
         models_nk = fit_models_nk(is_est, pc_est, tr_est, include_policy_smoothing)
 
-        # Initial values = sample means (simple anchor)
+        # Initial values = sample means
         y0 = float(is_est["Output Gap"].mean())
         pi0 = float(pc_est["Inflation Rate"].mean())
         i0 = float(tr_est["Nominal Interest Rate"].mean())
 
-        yS, piS, iS, rho_hat = simulate_nk(
+        yS, piS, iS = simulate_nk(
             T, models_nk, y0, pi0, i0,
             include_policy_smoothing=include_policy_smoothing,
             shock_block=nk_block, shock_size=nk_size, shock_time=nk_time
         )
 
         # Baseline (no shock) for comparison
-        y0s, pi0s, i0s, _ = simulate_nk(
+        y0s, pi0s, i0s = simulate_nk(
             T, models_nk, y0, pi0, i0,
             include_policy_smoothing=include_policy_smoothing,
             shock_block="None", shock_size=0.0, shock_time=nk_time
         )
 
-        # Plot (Output Gap in pp, Inflation in decimal→% for readability, Rate in %)
+        # === NEW: Taylor units toggle for NK
+        with st.sidebar:
+            st.divider()
+            st.header("Taylor rate units (NK)")
+            neutral_nk_pct = float(i0 * 100.0)  # mean level from tr_est
+            units_mode_nk = st.radio(
+                "Display as",
+                ["Deviation (pp)", "Level (% annual)"],
+                index=1,
+                key="units_nk"
+            )
+            st.caption(f"Neutral (sample mean): {neutral_nk_pct:.2f}%")
+
+        # Prepare plotting series according to units toggle
+        if units_mode_nk == "Deviation (pp)":
+            i0_plot = (i0s - i0) * 100.0
+            iS_plot = (iS - i0) * 100.0
+            i_ylabel = "pp"
+            i_title = "Policy Rate — deviation from neutral (pp)"
+        else:
+            i0_plot = i0s * 100.0
+            iS_plot = iS * 100.0
+            i_ylabel = "%"
+            i_title = "Nominal Policy Rate (% annual)"
+
+        # Plot (Output Gap in pp, Inflation in %, Rate per toggle)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         q = np.arange(T)
@@ -713,10 +759,9 @@ try:
         axes[1].plot(q, piS*100, linewidth=2, label="Shock")
         axes[1].set_title("Inflation Rate (%)"); axes[1].set_ylabel("%"); axes[1].grid(True, alpha=0.3); axes[1].legend()
 
-        axes[2].plot(q, i0s*100, linewidth=2, label="Baseline")
-        axes[2].plot(q, iS*100, linewidth=2, label="Shock")
-        axes[2].set_title("Nominal Interest Rate (%)"); axes[2].set_ylabel("%"); axes[2].set_xlabel("Quarters"); axes[2].grid(True, alpha=0.3); axes[2].legend()
-
+        axes[2].plot(q, i0_plot, linewidth=2, label="Baseline")
+        axes[2].plot(q, iS_plot, linewidth=2, label="Shock")
+        axes[2].set_title(i_title); axes[2].set_ylabel(i_ylabel); axes[2].set_xlabel("Quarters"); axes[2].grid(True, alpha=0.3); axes[2].legend()
         plt.tight_layout(); st.pyplot(fig)
 
         # Show estimated NK equations in LaTeX
@@ -739,11 +784,11 @@ try:
             pc_terms.append((float(v), sym))
         st.latex(build_latex_equation(float(mp.params.get("const", 0.0)), pc_terms, r"\pi_t", r"u_t"))
 
-        st.markdown("**Taylor Rule (No-smoothing by default)**")
+        st.markdown("**Taylor Rule**")
         tr_terms = []
         for k, v in mt.params.items():
             if k == "const": continue
-            sym = {"Inflation Gap": r"(\pi_t-\pi^\*)", "Output Gap": r"\hat y_t", "Nominal Rate L1": r"i_{t-1}"}.get(k, k)
+            sym = {"Inflation Gap": r"(\pi_t-\pi^*)", "Output Gap": r"\hat y_t", "Nominal Rate L1": r"i_{t-1}"}.get(k, k)
             tr_terms.append((float(v), sym))
         st.latex(build_latex_equation(float(mt.params.get("const", 0.0)), tr_terms, r"i_t", r"v_t"))
 
