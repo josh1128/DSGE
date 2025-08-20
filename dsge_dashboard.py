@@ -29,11 +29,9 @@ from pathlib import Path
 # Page setup
 # =========================
 st.set_page_config(page_title="DSGE IRF Dashboard", layout="wide")
-st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
+st.title("DSGE Dashboard")
 
 st.markdown(
-    "- **Original**: GDP & CPI in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
-    "- **Taylor** uses **inflation gap**: \\(\\pi_t - \\pi^*\\).\n"
     "- Use the sidebar to **toggle variables** in each curve."
 )
 
@@ -725,6 +723,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
