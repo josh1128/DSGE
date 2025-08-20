@@ -146,9 +146,50 @@ class SimpleNK3EqBuiltIn:
         return np.arange(T), x, pi, i
 
 # =========================
-# Sidebar
+# Sidebar (including Persistent Notes)
 # =========================
+NOTES_FILE = Path(__file__).parent / "user_notes.txt"
+
+def load_saved_notes() -> str:
+    try:
+        return NOTES_FILE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except Exception as e:
+        st.warning(f"Couldn't read notes: {e}")
+        return ""
+
+def save_notes(text: str) -> None:
+    try:
+        NOTES_FILE.write_text(text or "", encoding="utf-8")
+    except Exception as e:
+        st.error(f"Error saving notes: {e}")
+
 with st.sidebar:
+    # -------- Persistent Notes UI --------
+    st.header("🗒️ User Notes (Persistent)")
+    _existing_notes = load_saved_notes()
+    user_notes = st.text_area("Write your notes here:", value=_existing_notes, height=180, key="notes_textarea")
+
+    colN1, colN2, colN3 = st.columns([1,1,1])
+    with colN1:
+        if st.button("💾 Save Notes"):
+            save_notes(user_notes)
+            st.success("Notes saved.")
+    with colN2:
+        if st.button("🔄 Reload"):
+            st.experimental_rerun()
+    with colN3:
+        st.download_button(
+            label="⬇️ Download",
+            data=user_notes.encode("utf-8"),
+            file_name="user_notes.txt",
+            mime="text/plain",
+            help="Download your current notes as a text file."
+        )
+
+    st.caption(f"Saved to: `{NOTES_FILE}`")
+
     st.header("Model selection")
     model_choice = st.selectbox("Choose model version", ["Original (DSGE.xlsx)", "Simple NK (built-in)"], index=0)
 
@@ -294,10 +335,10 @@ with st.sidebar:
             help="Deviation: IRFs in percentage points around zero. Level: add a baseline rate and show %."
         )
     neutral_rate_pct = st.number_input(
-    "Baseline (neutral) nominal policy rate — % annual",
-    value=2.00, step=0.25, format="%.2f",
-    help="Use 2.00 for Bank of Canada's target neutral rate."
-)
+        "Baseline (neutral) nominal policy rate — % annual",
+        value=2.00, step=0.25, format="%.2f",
+        help="Use 2.00 for Bank of Canada's target neutral rate."
+    )
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -723,6 +764,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
