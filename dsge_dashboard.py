@@ -831,9 +831,8 @@ try:
             )
 
             # Calendar labels
-            start_q_index = {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4}[start_quarter]
-            periods = pd.period_range(freq="Q", start=pd.Period(year=int(start_year), quarter=start_q_index), periods=T_fore)
-            date_labels = [f"{p.year}Q{p.quarter}" for p in periods]
+            q_start = pd.Period(f"{start_year}Q{start_quarter[-1]}", freq="Q")
+            dates = pd.period_range(start=q_start, periods=T_fore, freq="Q").strftime("%YQ%q")
 
             # Convert policy to display units
             i_plot = iF.copy()
@@ -888,6 +887,7 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
 
 
 
