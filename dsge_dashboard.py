@@ -9,12 +9,11 @@
 #          • Add after smoothing (default)
 #          • Add to target (inside 1−ρ)
 #          • Force local jump (override)
-#      - NEW: Snap-back option (one-period response, then return to baseline)
 #      - LaTeX equations shown below charts (auto-updates to reflect selected vars)
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 #      - "Snap-back (no persistence)" option makes x_t & π_t one-period while
 #        KEEPING policy smoothing ρ_i so i_t decays geometrically.
-#      - Toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
+#      - NEW: toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -30,9 +29,13 @@ from pathlib import Path
 # Page setup
 # =========================
 st.set_page_config(page_title="DSGE IRF Dashboard", layout="wide")
-st.title("DSGE Dashboard")
+st.title("DSGE IRF Dashboard — IS, Phillips, Taylor")
 
-st.markdown("- Use the sidebar to **toggle variables** in each curve.")
+st.markdown(
+    "- **Original**: GDP & CPI in **%** (Dlog × 100); **Nominal rate** in **decimal**.\n"
+    "- **Taylor** uses **inflation gap**: \\(\\pi_t - \\pi^*\\).\n"
+    "- Use the sidebar to **toggle variables** in each curve."
+)
 
 # =========================
 # Helpers
@@ -155,22 +158,18 @@ with st.sidebar:
     T = st.slider("Horizon (quarters)", 8, 60, 20, 1)
 
     if model_choice == "Original (DSGE.xlsx)":
-        xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original",
-                               help="If omitted, the app looks for 'DSGE.xlsx' next to this script.")
+        xlf = st.file_uploader("Upload DSGE.xlsx (optional)", type=["xlsx"], key="upload_original", help="If omitted, the app looks for 'DSGE.xlsx' next to this script.")
         fallback = Path(__file__).parent / "DSGE.xlsx"
 
-        rho_sim = st.slider("Policy smoothing ρ (Taylor)", 0.0, 0.95, 0.80, 0.05,
-                            help="How much the policy rate inherits from its own past. Higher ρ ⇒ more persistence.")
+        rho_sim = st.slider("Policy smoothing ρ (Taylor)", 0.0, 0.95, 0.80, 0.05, help="How much the policy rate inherits from its own past. Higher ρ ⇒ more persistence.")
 
         st.header("Inflation target for Taylor")
-        use_sample_mean = st.checkbox("Use sample mean of DlogCPI as target π*", value=False,
-                                      help="If checked, π* is the average of your sample's quarterly inflation.")
+        use_sample_mean = st.checkbox("Use sample mean of DlogCPI as target π*", value=False, help="If checked, π* is the average of your sample's quarterly inflation.")
         if use_sample_mean:
             target_annual_pct = None
             st.caption("π* will be set to sample mean (quarterly) after data loads.")
         else:
-            target_annual_pct = st.slider("π* (annual %)", 0.0, 5.0, 2.0, 0.1,
-                                          help="Annualized target inflation; we convert this to a quarterly decimal.")
+            target_annual_pct = st.slider("π* (annual %)", 0.0, 5.0, 2.0, 0.1, help="Annualized target inflation; we convert this to a quarterly decimal.")
         st.divider()
 
         st.header("Shock")
@@ -180,22 +179,11 @@ with st.sidebar:
             index=0,
             help="Choose which block is directly shocked. Policy shocks move the rate by the bp size below."
         )
-        is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f",
-                                           help="One-time bump to GDP growth (percentage points).")
-        pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f",
-                                           help="One-time bump to inflation (percentage points).")
-        policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d",
-                                              help="Size of the policy rate shock in basis points (25 bp = 0.25%).")
+        is_shock_size_pp = st.number_input("IS shock (Δ DlogGDP, pp)", value=0.50, step=0.10, format="%.2f", help="One-time bump to GDP growth (percentage points).")
+        pc_shock_size_pp = st.number_input("Phillips shock (Δ DlogCPI, pp)", value=0.10, step=0.05, format="%.2f", help="One-time bump to inflation (percentage points).")
+        policy_shock_bp_abs = st.number_input("Policy shock size (absolute bp)", value=25, step=5, format="%d", help="Size of the policy rate shock in basis points (25 bp = 0.25%).")
         shock_quarter = st.slider("Shock timing (t)", 1, T-1, 1, 1, help="Quarter index at which the shock hits.")
-        shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05,
-                                  help="How much the shock decays each period. 0 = one-and-done.")
-
-        # NEW: Snap-back option for Original model
-        snapback_orig = st.checkbox(
-            "Snap-back after shock (return to baseline next quarter)",
-            value=True,
-            help="Apply the shock at t, then from t+1 onward feed baseline lags into all equations."
-        )
+        shock_persist = st.slider("Shock persistence ρ_shock", 0.0, 0.95, 0.0, 0.05, help="How much the shock decays each period. 0 = one-and-done.")
 
         st.header("Policy shock behavior")
         policy_mode = st.radio(
@@ -208,7 +196,9 @@ with st.sidebar:
                   "• **Force local jump**: Ensures a minimum jump by the shock size at t.")
         )
 
+        # =========================
         # Variable Toggles
+        # =========================
         st.divider()
         st.header("Variable selection (include/exclude)")
 
@@ -237,44 +227,79 @@ with st.sidebar:
                 "• **Taylor Rule (Policy)**: φπ, φx, ρi")
 
         st.header("Simple NK parameters (pp units)")
-        st.subheader("IS Curve (Demand)")
-        sigma = st.slider("σ — Demand sensitivity denominator", 0.2, 5.0, 1.00, 0.05)
-        rho_x = st.slider("ρx — Output persistence", 0.0, 0.98, 0.50, 0.02)
-        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)", 0.0, 0.98, 0.80, 0.02)
 
-        st.subheader("Phillips Curve (Supply)")
-        kappa = st.slider("κ — Phillips slope", 0.01, 0.50, 0.10, 0.01)
-        gamma_pi = st.slider("γπ — Inflation inertia", 0.0, 0.95, 0.50, 0.05)
-        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)", 0.0, 0.98, 0.50, 0.02)
+        # -------- IS (Demand) --------
+        st.subheader("IS Curve (Demand): controls how rates and shocks move activity (x_t)")
+        sigma = st.slider("σ — Demand sensitivity denominator",
+                          0.2, 5.0, 1.00, 0.05,
+                          help="Bigger σ ⇒ spending is *less* sensitive to real rates (1/σ is sensitivity).")
+        rho_x = st.slider("ρx — Output persistence",
+                          0.0, 0.98, 0.50, 0.02,
+                          help="How much yesterday’s output gap carries into today.")
+        rho_r = st.slider("ρr — Demand-shock persistence (r^n_t)",
+                          0.0, 0.98, 0.80, 0.02,
+                          help="How long a demand shock sticks around.")
 
-        st.subheader("Taylor Rule (Policy)")
-        phi_pi = st.slider("φπ — Response to inflation", 1.0, 3.0, 1.50, 0.05)
-        phi_x = st.slider("φx — Response to output gap", 0.00, 1.00, 0.125, 0.005)
-        rho_i = st.slider("ρi — Policy rate smoothing", 0.0, 0.98, 0.80, 0.02)
+        # -------- Phillips (Supply) --------
+        st.subheader("Phillips Curve (Supply): links activity to inflation (π_t)")
+        kappa = st.slider("κ — Phillips slope", 0.01, 0.50, 0.10, 0.01,
+                          help="How strongly the output gap moves inflation.")
+        gamma_pi = st.slider("γπ — Inflation inertia", 0.0, 0.95, 0.50, 0.05,
+                             help="How much last period’s inflation carries over.")
+        rho_u = st.slider("ρu — Cost-push shock persistence (u_t)", 0.0, 0.98, 0.50, 0.02,
+                          help="Persistence of non-demand inflation shocks.")
 
-        # Shock controls
+        # -------- Taylor Rule (Policy) --------
+        st.subheader("Taylor Rule (Policy): sets the interest rate (i_t)")
+        phi_pi = st.slider("φπ — Response to inflation", 1.0, 3.0, 1.50, 0.05,
+                           help="How aggressively policy reacts to inflation.")
+        phi_x = st.slider("φx — Response to output gap", 0.00, 1.00, 0.125, 0.005,
+                          help="How much policy reacts to economic slack/heat.")
+        rho_i = st.slider("ρi — Policy rate smoothing", 0.0, 0.98, 0.80, 0.02,
+                          help="Higher ρi ⇒ rate changes more gradually over time.")
+
+        # ---- Shock controls ----
         st.divider()
         st.header("Shock")
-        shock_type_nk = st.selectbox("Shock type", ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"], index=0)
-        shock_size_pp_nk = st.number_input("Shock size (pp)", value=1.00, step=0.25, format="%.2f")
-        shock_quarter_nk = st.slider("Shock timing t", 1, T-1, 1, 1)
-        shock_persist_nk = st.slider("Shock persistence ρ_shock", 0.0, 0.98, 0.80, 0.02)
+        shock_type_nk = st.selectbox(
+            "Shock type (what we 'poke')",
+            ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
+            index=0,
+            help="Pick which block gets a one-time disturbance."
+        )
+        shock_size_pp_nk = st.number_input(
+            "Shock size (percentage points, pp)", value=1.00, step=0.25, format="%.2f",
+            help="Magnitude of the initial shock (pp). Use negative for easing."
+        )
+        shock_quarter_nk = st.slider(
+            "Shock timing t (quarter index)", 1, T-1, 1, 1,
+            help="Quarter index where the shock hits."
+        )
+        shock_persist_nk = st.slider(
+            "Shock persistence ρ_shock (for demand/cost)", 0.0, 0.98, 0.80, 0.02,
+            help="Decay rate of the shock each quarter."
+        )
 
-        # Snap-back for Simple NK
+        # ---- Snap-back option ----
         snapback = st.checkbox(
             "Snap-back (no persistence after the shock)",
             value=True,
-            help="Sets ρx = γπ = 0 and forces the shock one-period (ρ_shock = 0). Keeps ρi so i_t decays."
+            help="Sets ρx = γπ = 0 and forces the shock to be one-period (ρ_shock = 0). "
+                 "Policy smoothing ρi is kept so i_t decays geometrically."
         )
 
-        units_mode = st.radio("Policy rate units", ["Deviation (pp)", "Level (% annual)"], index=0)
-
-    # Neutral level for NK display
+        # ---- Display option for policy rate UNITS (NEW) ----
+        units_mode = st.radio(
+            "Policy rate units",
+            ["Deviation (pp)", "Level (% annual)"],
+            index=0,
+            help="Deviation: IRFs in percentage points around zero. Level: add a baseline rate and show %."
+        )
     neutral_rate_pct = st.number_input(
-        "Baseline (neutral) nominal policy rate — % annual",
-        value=2.00, step=0.25, format="%.2f",
-        help="Use 2.00 for a typical neutral rate."
-    )
+    "Baseline (neutral) nominal policy rate — % annual",
+    value=2.00, step=0.25, format="%.2f",
+    help="Use 2.00 for Bank of Canada's target neutral rate."
+)
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -388,44 +413,33 @@ def fit_models_original(
         "rho_hat": rhoh, "pi_star_quarterly": float(pi_star_quarterly),
     }
 
-def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, rho, snapback=False):
-    """Create shock arrays (IS, Phillips, or Policy). If snapback=True, no post-t shock tails."""
+def build_shocks_original(T, target, is_size_pp, pc_size_pp, policy_bp_abs, t0, rho):
+    """Create shock arrays (IS, Phillips, or Policy) with optional AR(1)-style decay."""
     is_arr = np.zeros(T); pc_arr = np.zeros(T); pol_arr = np.zeros(T)
 
     if target == "IS (Demand)":
         is_arr[t0] = is_size_pp / 100.0
-        if not snapback:
-            for k in range(t0 + 1, T): is_arr[k] = rho * is_arr[k - 1]
+        for k in range(t0 + 1, T): is_arr[k] = rho * is_arr[k - 1]
     elif target == "Phillips (Supply)":
         pc_arr[t0] = pc_size_pp / 100.0
-        if not snapback:
-            for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
+        for k in range(t0 + 1, T): pc_arr[k] = rho * pc_arr[k - 1]
     elif target == "Taylor (Policy tightening)":
         pol_arr[t0] =  (policy_bp_abs / 10000.0)
-        if not snapback:
-            for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
+        for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
     elif target == "Taylor (Policy easing)":
         pol_arr[t0] = -(policy_bp_abs / 10000.0)
-        if not snapback:
-            for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
+        for k in range(t0 + 1, T): pol_arr[k] = rho * pol_arr[k - 1]
 
     return is_arr, pc_arr, pol_arr
 
 def simulate_original(
     T: int, rho_sim: float, df_est: pd.DataFrame, models: Dict[str, sm.regression.linear_model.RegressionResultsWrapper],
     means: Dict[str, float], i_mean_dec: float, real_rate_mean_dec: float, pi_star_quarterly: float,
-    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)",
-    snapback: bool = False, snap_t: Optional[int] = None, baseline_paths: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+    is_shock_arr=None, pc_shock_arr=None, policy_shock_arr=None, policy_mode: str = "Add after smoothing (standard)"
 ):
-    """
-    Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models.
-
-    If snapback=True and snap_t is provided (0-indexed t), then:
-      • the shock is applied only at t==snap_t, and
-      • for t>snap_t, the lags fed into IS/Phillips/Taylor come from the baseline paths,
-        preventing propagation (paths rejoin baseline at t+1).
-    """
+    """Forward-simulate GDP growth, inflation, and the rate using the estimated OLS models."""
     g = np.zeros(T); p = np.zeros(T); i = np.zeros(T)
+
     g[0] = float(df_est["DlogGDP"].mean())
     p[0] = float(df_est["Dlog_CPI"].mean())
     i[0] = i_mean_dec
@@ -437,21 +451,11 @@ def simulate_original(
     if pc_shock_arr is None: pc_shock_arr = np.zeros(T)
     if policy_shock_arr is None: policy_shock_arr = np.zeros(T)
 
-    base_g, base_p, base_i = (baseline_paths if baseline_paths is not None else (None, None, None))
-
     for t in range(1, T):
-        post_snap = snapback and (snap_t is not None) and (t > snap_t)
+        rr_lag2 = (i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec
 
-        # Choose which lags to feed (baseline vs shocked)
-        g_lag = (base_g[t-1] if post_snap and base_g is not None else g[t-1])
-        p_lag = (base_p[t-1] if post_snap and base_p is not None else p[t-1])
-        i_lag = (base_i[t-1] if post_snap and base_i is not None else i[t-1])
-        rr_lag2 = ((base_i[t-2] - base_p[t-2]) if post_snap and base_i is not None and base_p is not None and t >= 2
-                   else ((i[t - 2] - p[t - 2]) if t >= 2 else real_rate_mean_dec))
-
-        # IS
         vals_is = {
-            "DlogGDP_L1": g_lag,
+            "DlogGDP_L1": g[t - 1],
             "Real_Rate_L2_data": rr_lag2,
             "Dlog FD_Lag1": means["Dlog FD_Lag1"],
             "Dlog_REER": means["Dlog_REER"],
@@ -459,20 +463,18 @@ def simulate_original(
             "Dlog_NonEnergy": means["Dlog_NonEnergy"],
         }
         Xis = row_from_params(model_is.params.index, vals_is)
-        g[t] = float(model_is.predict(Xis).iloc[0]) + (is_shock_arr[t] if (not post_snap or t == snap_t) else 0.0)
+        g[t] = float(model_is.predict(Xis).iloc[0]) + is_shock_arr[t]
 
-        # Phillips
         vals_pc = {
-            "Dlog_CPI_L1": p_lag,
-            "DlogGDP_L1": g_lag,
+            "Dlog_CPI_L1": p[t - 1],
+            "DlogGDP_L1": g[t - 1],
             "Dlog_Reer_L2": means["Dlog_Reer_L2"],
             "Dlog_Energy_L1": means["Dlog_Energy_L1"],
             "Dlog_Non_Energy_L1": means["Dlog_Non_Energy_L1"],
         }
         Xpc = row_from_params(model_pc.params.index, vals_pc)
-        p[t] = float(model_pc.predict(Xpc).iloc[0]) + (pc_shock_arr[t] if (not post_snap or t == snap_t) else 0.0)
+        p[t] = float(model_pc.predict(Xpc).iloc[0]) + pc_shock_arr[t]
 
-        # Taylor — compute i* then partial adjustment + policy shock
         pi_gap_t = p[t] - pi_star_quarterly
         if not np.isnan(alpha_star) and (("Inflation_Gap" in model_tr.params.index) or ("DlogGDP" in model_tr.params.index)):
             i_star = (alpha_star
@@ -483,18 +485,17 @@ def simulate_original(
             Xtr_star = row_from_params(model_tr.params.index, vals_tr)
             i_star = float(model_tr.predict(Xtr_star).iloc[0])
 
-        eps = policy_shock_arr[t] if (not post_snap or t == snap_t) else 0.0
-
+        eps = policy_shock_arr[t]  # decimal (e.g., 0.0025 = 25 bp)
         if policy_mode.startswith("Add after"):
-            i_raw = rho_sim * i_lag + (1 - rho_sim) * i_star + eps
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
         elif policy_mode.startswith("Add to target"):
-            i_raw = rho_sim * i_lag + (1 - rho_sim) * (i_star + eps)
-        else:  # Force local jump (override)
-            i_raw = rho_sim * i_lag + (1 - rho_sim) * i_star + eps
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * (i_star + eps)
+        else:
+            i_raw = rho_sim * i[t - 1] + (1 - rho_sim) * i_star + eps
             if eps > 0:
-                i_raw = max(i_raw, i_lag + abs(eps))
+                i_raw = max(i_raw, i[t - 1] + abs(eps))
             elif eps < 0:
-                i_raw = min(i_raw, i_lag - abs(eps))
+                i_raw = min(i_raw, i[t - 1] - abs(eps))
 
         i[t] = float(i_raw)
 
@@ -533,23 +534,17 @@ try:
             "Dlog_Non_Energy_L1": float(df_est["Dlog_Non_Energy_L1"].mean()),
         }
 
-        # Build shocks
-        t0 = shock_quarter  # already 1..T-1 per control; we treat it as index directly on the plots
+        # Build shocks & simulate
         is_arr, pc_arr, pol_arr = build_shocks_original(
-            T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, t0, shock_persist, snapback=snapback_orig
+            T, shock_target, is_shock_size_pp, pc_shock_size_pp, policy_shock_bp_abs, shock_quarter, shock_persist
         )
-
-        # Baseline (no shock)
         g0, p0, i0 = simulate_original(
-            T, models_o["rho_hat"], df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
             policy_mode=policy_mode
         )
-
-        # Shocked (snap-back uses baseline lags after t0)
         gS, pS, iS = simulate_original(
-            T, models_o["rho_hat"], df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
-            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode,
-            snapback=snapback_orig, snap_t=t0, baseline_paths=(g0, p0, i0)
+            T, rho_sim, df_est, models_o, means_o, i_mean_dec, real_rate_mean_dec, pi_star_quarterly,
+            is_shock_arr=is_arr, pc_shock_arr=pc_arr, policy_shock_arr=pol_arr, policy_mode=policy_mode
         )
 
         # Plot IRFs
@@ -560,19 +555,19 @@ try:
 
         axes[0].plot(quarters, g0*100, label="Baseline", linewidth=2)
         axes[0].plot(quarters, gS*100, label="Shock", linewidth=2)
-        axes[0].axvline(t0, **vline_kwargs)
+        axes[0].axvline(shock_quarter, **vline_kwargs)
         axes[0].set_title("Real GDP Growth (DlogGDP, %)"); axes[0].set_ylabel("%")
         axes[0].grid(True, alpha=0.3); axes[0].legend(loc="best")
 
         axes[1].plot(quarters, p0*100, label="Baseline", linewidth=2)
         axes[1].plot(quarters, pS*100, label="Shock", linewidth=2)
-        axes[1].axvline(t0, **vline_kwargs)
+        axes[1].axvline(shock_quarter, **vline_kwargs)
         axes[1].set_title("Inflation (DlogCPI, %)"); axes[1].set_ylabel("%")
         axes[1].grid(True, alpha=0.3); axes[1].legend(loc="best")
 
         axes[2].plot(quarters, i0, label="Baseline", linewidth=2)
         axes[2].plot(quarters, iS, label="Shock", linewidth=2)
-        axes[2].axvline(t0, **vline_kwargs)
+        axes[2].axvline(shock_quarter, **vline_kwargs)
         axes[2].set_title("Nominal Policy Rate (decimal)")
         axes[2].set_xlabel("Quarters ahead"); axes[2].set_ylabel("decimal")
         axes[2].grid(True, alpha=0.3); axes[2].legend(loc="best")
@@ -581,8 +576,8 @@ try:
 
         # Readout at the shock quarter
         if shock_target.startswith("Taylor"):
-            delta_i_bp = (iS - i0)[t0] * 10000.0
-            st.info(f"Δ policy rate at t={t0}: {delta_i_bp:.1f} bp  |  mode: {policy_mode}  |  ρ={models_o['rho_hat']:.2f}")
+            delta_i_bp = (iS - i0)[shock_quarter] * 10000.0
+            st.info(f"Δ policy rate at t={shock_quarter}: {delta_i_bp:.1f} bp  |  mode: {policy_mode}  |  ρ={rho_sim:.2f}")
 
         # ===== LaTeX equations (reflect chosen variables) =====
         st.subheader("Estimated Equations (Original model)")
@@ -675,10 +670,11 @@ try:
         h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, rho_for_shock)
         h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, rho_for_shock)
 
-        # Prepare policy series for plotting in chosen units
+        # ---- Prepare policy series for plotting in chosen units ----
         i0_plot, iS_plot = i0.copy(), iS.copy()
         i_ylabel = "pp"
         if units_mode == "Level (% annual)":
+            # i0 and iS are deviations in pp; add a baseline level (neutral_rate_pct) to show %
             i0_plot = neutral_rate_pct + i0_plot
             iS_plot = neutral_rate_pct + iS_plot
             i_ylabel = "%"
@@ -729,7 +725,6 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
-
 
 
 
