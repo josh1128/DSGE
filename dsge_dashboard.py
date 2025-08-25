@@ -13,7 +13,8 @@
 #   2) Simple NK (built-in): 3-eq NK DSGE-lite with tunable parameters
 #      - "Snap-back (no persistence)" option makes x_t & π_t one-period while
 #        KEEPING policy smoothing ρ_i so i_t decays geometrically.
-#      - NEW: toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
+#      - Toggle to show policy rate in **levels (% annual)** instead of deviations (pp).
+#      - NEW: Out-of-sample forecast mode with calendar date labels and optional CSV shocks.
 # -----------------------------------------------------------
 
 from dataclasses import dataclass
@@ -92,14 +93,20 @@ class NKParamsSimple:
     gamma_pi: float = 0.50  # γπ: inflation inertia
 
 class SimpleNK3EqBuiltIn:
-    """Tiny 3-equation NK model used for quick IRFs without loading Excel."""
+    """Tiny 3-equation NK model used for quick IRFs or exogenous-path simulations."""
     def __init__(self, params: Optional[NKParamsSimple] = None):
         self.p = params or NKParamsSimple()
 
-    def irf(self, shock: str = "demand", T: int = 24, size_pp: float = 1.0, t0: int = 0, rho_override: Optional[float] = None):
+    def irf(
+        self,
+        shock: str = "demand",
+        T: int = 24,
+        size_pp: float = 1.0,
+        t0: int = 0,
+        rho_override: Optional[float] = None
+    ):
         """
-        Generate impulse responses for output gap (x), inflation (pi), and rate (i)
-        to a chosen shock type with optional shock persistence override.
+        Impulse responses for output gap (x), inflation (pi), and rate (i) to a one-time shock.
         All variables are in **percentage points** (pp) deviations from baseline.
         """
         p = self.p
@@ -142,6 +149,53 @@ class SimpleNK3EqBuiltIn:
             denom = 1.0 + (A_x / p.sigma)
             num = (p.rho_x * x_lag) - (B_const / p.sigma) + (r_nat[t] / p.sigma)
             x[t] = num / max(denom, 1e-8)
+            pi[t] = p.gamma_pi * pi_lag + p.kappa * x[t] + u[t]
+            i[t]  = p.rho_i * i_lag + (1 - p.rho_i) * (p.phi_pi * pi[t] + p.phi_x * x[t]) + e_i[t]
+
+        return np.arange(T), x, pi, i
+
+    def simulate_path(
+        self,
+        T: int,
+        x0: float,
+        pi0: float,
+        i0: float,
+        r_nat: Optional[np.ndarray] = None,
+        u: Optional[np.ndarray] = None,
+        e_i: Optional[np.ndarray] = None
+    ):
+        """
+        Simulate a forward path given initial conditions and **exogenous sequences**
+        for demand (r_nat), cost-push (u), and policy disturbance (e_i). Units = pp.
+        """
+        p = self.p
+        x = np.zeros(T); pi = np.zeros(T); i = np.zeros(T)
+        x[0] = float(x0); pi[0] = float(pi0); i[0] = float(i0)
+
+        r_nat = np.zeros(T) if r_nat is None else np.asarray(r_nat, dtype=float)
+        u     = np.zeros(T) if u     is None else np.asarray(u, dtype=float)
+        e_i   = np.zeros(T) if e_i   is None else np.asarray(e_i, dtype=float)
+
+        # Ensure the arrays are length T
+        def _fix_len(arr):
+            if len(arr) < T:
+                return np.pad(arr, (0, T-len(arr)), constant_values=0.0)
+            return arr[:T]
+        r_nat = _fix_len(r_nat); u = _fix_len(u); e_i = _fix_len(e_i)
+
+        for t in range(1, T):
+            x_lag, pi_lag, i_lag = x[t-1], pi[t-1], i[t-1]
+
+            A_x = (1 - p.rho_i) * (p.phi_pi * p.kappa + p.phi_x) - p.kappa
+            B_const = (
+                p.rho_i * i_lag
+                + ((1 - p.rho_i) * p.phi_pi * p.gamma_pi - p.gamma_pi) * pi_lag
+                + ((1 - p.rho_i) * p.phi_pi - 1.0) * u[t]
+                + e_i[t]
+            )
+            denom = 1.0 + (A_x / p.sigma)
+            num = (p.rho_x * x_lag) - (B_const / p.sigma) + (r_nat[t] / p.sigma)
+            x[t]  = num / max(denom, 1e-8)
             pi[t] = p.gamma_pi * pi_lag + p.kappa * x[t] + u[t]
             i[t]  = p.rho_i * i_lag + (1 - p.rho_i) * (p.phi_pi * pi[t] + p.phi_x * x[t]) + e_i[t]
 
@@ -260,7 +314,7 @@ with st.sidebar:
 
         # ---- Shock controls ----
         st.divider()
-        st.header("Shock")
+        st.header("Shock (IRF mode)")
         shock_type_nk = st.selectbox(
             "Shock type (what we 'poke')",
             ["Demand (IS)", "Cost-push (Phillips)", "Policy (Taylor)"],
@@ -288,18 +342,19 @@ with st.sidebar:
                  "Policy smoothing ρi is kept so i_t decays geometrically."
         )
 
-        # ---- Display option for policy rate UNITS (NEW) ----
+        # ---- Display option for policy rate UNITS ----
         units_mode = st.radio(
             "Policy rate units",
             ["Deviation (pp)", "Level (% annual)"],
             index=0,
             help="Deviation: IRFs in percentage points around zero. Level: add a baseline rate and show %."
         )
+
     neutral_rate_pct = st.number_input(
-    "Baseline (neutral) nominal policy rate — % annual",
-    value=2.00, step=0.25, format="%.2f",
-    help="Use 2.00 for Bank of Canada's target neutral rate."
-)
+        "Baseline (neutral) nominal policy rate — % annual",
+        value=2.00, step=0.25, format="%.2f",
+        help="Use 2.00 for Bank of Canada's target neutral rate."
+    )
 
 # =========================
 # ORIGINAL MODEL (DSGE.xlsx)
@@ -643,43 +698,32 @@ try:
         # =========================
         # Simple NK (built-in)
         # =========================
-        # Apply snap-back: x and π have no inertia, shock is one-period.
-        # Keep policy smoothing ρ_i to get a geometric decay in i_t.
+        # Build parameter set (apply snapback if chosen)
         P = NKParamsSimple(
             sigma=sigma, kappa=kappa, phi_pi=phi_pi, phi_x=phi_x,
-            rho_i=rho_i,                         # KEEP smoothing for the decaying path
-            rho_x=(0.0 if snapback else rho_x),  # kill output inertia if snap-back
+            rho_i=rho_i,
+            rho_x=(0.0 if snapback else rho_x),
             rho_r=rho_r, rho_u=rho_u,
-            gamma_pi=(0.0 if snapback else gamma_pi)  # kill inflation inertia if snap-back
+            gamma_pi=(0.0 if snapback else gamma_pi)
         )
         model = SimpleNK3EqBuiltIn(P)
         label_to_code = {"Demand (IS)": "demand", "Cost-push (Phillips)": "cost", "Policy (Taylor)": "policy"}
         code = label_to_code[shock_type_nk]
         t0 = max(0, min(T-1, shock_quarter_nk - 1))
-
-        st.info("**Model key (Simple NK):**  "
-                r"$x_t$ = output gap (pp),  "
-                r"$\pi_t$ = inflation (pp),  "
-                r"$i_t$ = nominal policy rate (pp).  "
-                r"$r_t^n$ = demand/natural-rate shock (pp),  "
-                r"$u_t$ = cost-push shock (pp).")
-
         rho_for_shock = 0.0 if snapback else shock_persist_nk
 
-        # Baseline (size 0) vs Shock
+        # ===== IRF block =====
+        st.subheader("Impulse responses (IRF mode)")
         h, x0, pi0, i0 = model.irf(code, T, 0.0, t0, rho_for_shock)
         h, xS, piS, iS = model.irf(code, T, shock_size_pp_nk, t0, rho_for_shock)
 
-        # ---- Prepare policy series for plotting in chosen units ----
         i0_plot, iS_plot = i0.copy(), iS.copy()
         i_ylabel = "pp"
         if units_mode == "Level (% annual)":
-            # i0 and iS are deviations in pp; add a baseline level (neutral_rate_pct) to show %
             i0_plot = neutral_rate_pct + i0_plot
             iS_plot = neutral_rate_pct + iS_plot
             i_ylabel = "%"
 
-        # Plot IRFs (x, π in pp; i either pp or % depending on selection)
         plt.rcParams.update({"axes.titlesize": 16, "axes.labelsize": 12, "legend.fontsize": 11})
         fig, axes = plt.subplots(3, 1, figsize=(12, 12), sharex=True)
         vline_kwargs = dict(color="black", linestyle=":", linewidth=1)
@@ -708,6 +752,88 @@ try:
             st.latex(r"\pi_t = \gamma_\pi \pi_{t-1} \;+\; \kappa x_t \;+\; u_t")
             st.latex(r"i_t = \rho_i i_{t-1} \;+\; (1-\rho_i)(\phi_\pi \pi_t + \phi_x x_t) \;+\; \varepsilon^i_t")
 
+        st.divider()
+
+        # ===== Out-of-sample forecast block =====
+        st.subheader("Out-of-sample forecast (Simple NK)")
+        forecast_mode = st.checkbox("Enable forecast mode (label by calendar dates)", value=True)
+
+        if forecast_mode:
+            colA, colB, colC = st.columns(3)
+            with colA:
+                start_year = st.number_input("Start year", value=2019, step=1, format="%d")
+            with colB:
+                start_quarter = st.selectbox("Start quarter", ["Q1", "Q2", "Q3", "Q4"], index=3)
+            with colC:
+                T_fore = st.slider("Forecast horizon (quarters)", 4, 40, 24, 1)
+
+            x0_init = st.number_input("Initial output gap x₀ (pp)", value=0.30, step=0.10, format="%.2f")
+            pi0_init = st.number_input("Initial inflation π₀ (pp)", value=0.30, step=0.10, format="%.2f")
+            i0_init = st.number_input("Initial policy rate i₀ (pp deviation)", value=0.30, step=0.10, format="%.2f")
+
+            st.caption("Optional: upload CSV with columns **r_nat**, **u**, **e_i** (all in pp). Extra columns/rows ignored.")
+            csv = st.file_uploader("Upload exogenous paths (optional)", type=["csv"], key="nk_fore_csv")
+
+            r_nat_path = u_path = e_i_path = None
+            if csv is not None:
+                try:
+                    df_exo = pd.read_csv(csv)
+                    def _col(name):
+                        if name in df_exo.columns:
+                            s = pd.to_numeric(df_exo[name], errors="coerce").fillna(0.0).values.astype(float)
+                            if len(s) < T_fore:
+                                s = np.pad(s, (0, T_fore-len(s)), constant_values=0.0)
+                            else:
+                                s = s[:T_fore]
+                            return s
+                        return None
+                    r_nat_path = _col("r_nat")
+                    u_path     = _col("u")
+                    e_i_path   = _col("e_i")
+                except Exception as ee:
+                    st.warning(f"Could not parse CSV: {ee}")
+
+            # Simulate path
+            _, xF, piF, iF = model.simulate_path(
+                T=T_fore, x0=x0_init, pi0=pi0_init, i0=i0_init,
+                r_nat=r_nat_path, u=u_path, e_i=e_i_path
+            )
+
+            # Calendar labels (robust construction; avoids freq=None bug)
+            q_start = pd.Period(f"{start_year}Q{start_quarter[-1]}", freq="Q")
+            dates = pd.period_range(start=q_start, periods=T_fore, freq="Q").strftime("%YQ%q")
+
+            # Prepare policy rate units
+            i_plot = iF.copy()
+            ylab_i = "pp"
+            if units_mode == "Level (% annual)":
+                i_plot = neutral_rate_pct + i_plot
+                ylab_i = "%"
+
+            # Plot forecast with calendar x-ticks
+            plt.rcParams.update({"axes.titlesize": 14, "axes.labelsize": 11, "legend.fontsize": 10})
+            figF, axesF = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+            idx = np.arange(T_fore)
+
+            axesF[0].plot(idx, xF, linewidth=2)
+            axesF[0].set_title("Output Gap (pp)")
+            axesF[0].grid(True, alpha=0.3)
+
+            axesF[1].plot(idx, piF, linewidth=2)
+            axesF[1].set_title("Inflation (pp)")
+            axesF[1].grid(True, alpha=0.3)
+
+            axesF[2].plot(idx, i_plot, linewidth=2)
+            axesF[2].set_title("Policy Rate")
+            axesF[2].set_ylabel(ylab_i)
+            axesF[2].set_xlabel("Quarter")
+            axesF[2].grid(True, alpha=0.3)
+            axesF[2].set_xticks(idx)
+            axesF[2].set_xticklabels(dates, rotation=45)
+
+            plt.tight_layout()
+            st.pyplot(figF)
+
         with st.expander("Symbol glossary (Simple NK)"):
             st.markdown(
                 r"""
@@ -725,6 +851,8 @@ try:
 except Exception as e:
     st.error(f"Problem loading or running the selected model: {e}")
     st.stop()
+
+
 
 
 
